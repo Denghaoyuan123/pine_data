@@ -203,8 +203,9 @@
                 <li>Press `Start episode` to begin a new recording using the current instruction text. Keyboard: `c`.</li>
                 <li>Press `Label subtask` whenever you want to mark a subtask boundary inside the current episode. Keyboard: `l`.</li>
                 <li>Press `Stop and save` to finish the episode and write data to disk. Keyboard: `s`.</li>
+                <li>Use `Save + shutdown` when you need to preserve the current episode while stopping the arm. Keyboard: `x`.</li>
                 <li>Use `Delete last` only when you want to remove the most recently saved episode. Keyboard: `d`.</li>
-                <li>Use `Shutdown` to close the tmux backend session and stop the recorder cleanly. Keyboard: `q`.</li>
+                <li>Use `Shutdown` to close the tmux backend session and stop the recorder cleanly without saving an active episode. Keyboard: `q`.</li>
                 <li>Read the status box at the bottom for tmux logs, save path, and runtime errors.</li>
               </ul>
             </div>
@@ -227,6 +228,7 @@
             <button id="labelSubtaskBtn" class="button button-secondary" title="Keyboard shortcut: L" aria-keyshortcuts="L">Label subtask (<strong>L</strong>)</button>
             <button id="stopRecordingBtn" class="button button-secondary" title="Keyboard shortcut: S" aria-keyshortcuts="S">Stop and save (<strong>S</strong>)</button>
             <button id="deleteEpisodeBtn" class="button button-danger-soft" title="Keyboard shortcut: D" aria-keyshortcuts="D">Delete last (<strong>D</strong>)</button>
+            <button id="saveShutdownRecorderBtn" class="button button-danger-soft" title="Keyboard shortcut: X" aria-keyshortcuts="X">Save + shutdown (<strong>X</strong>)</button>
             <button id="shutdownRecorderBtn" class="button button-danger" title="Keyboard shortcut: Q" aria-keyshortcuts="Q">Shutdown (<strong>Q</strong>)</button>
           </div>
 
@@ -345,6 +347,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=20260514a" defer></script>
+  <script src="/static/app.js?v=20260517a" defer></script>
 </body>
 </html>

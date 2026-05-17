@@ -38,3 +38,4 @@ coscli_output/
 
 # Generated exports
 exported_images/
+.claude/

@@ -472,6 +472,8 @@ class TmuxRecordingManager:
         ).expanduser().resolve()
         self.pipeline_profiles = self._build_pipeline_profiles()
         self.active_pipeline = "spacemouse"
+        self.shutdown_save_in_progress = False
+        self.shutdown_save_thread: threading.Thread | None = None
         self._set_active_pipeline(self.active_pipeline)
 
     def _build_pipeline_profiles(self) -> dict[str, dict[str, Any]]:
@@ -509,6 +511,10 @@ class TmuxRecordingManager:
         default_teleop_status = BASE_DIR / ".runtime" / f"{self.session_name}_teleop_status.json"
         self.teleop_status_file = Path(str(profile.get("teleop_status_file", default_teleop_status))).expanduser().resolve()
         self.preview_dir = self.status_file.with_name(f"{self.status_file.stem}_previews")
+        if not hasattr(self, "shutdown_save_in_progress"):
+            self.shutdown_save_in_progress = False
+        if not hasattr(self, "shutdown_save_thread"):
+            self.shutdown_save_thread = None
 
     def _detect_running_pipeline(self) -> str | None:
         for pipeline in [self.active_pipeline, *[name for name in self.pipeline_profiles if name != self.active_pipeline]]:
@@ -1117,11 +1123,83 @@ class TmuxRecordingManager:
                 return
             time.sleep(0.1)
 
+    def _wait_for_camera_save_complete(self, timeout_s: float = 120.0) -> dict[str, Any]:
+        deadline = time.time() + timeout_s
+        last_payload: dict[str, Any] = {}
+        while time.time() < deadline:
+            payload = self._load_status_file()
+            if payload:
+                last_payload = payload
+                recording = bool(payload.get("recording", False))
+                saving = bool(payload.get("saving", False))
+                last_saved = str(payload.get("last_saved_episode") or "").strip()
+                message = str(payload.get("message") or "")
+                if not recording and not saving and (last_saved or message.startswith("Saved episode")):
+                    return payload
+                last_error = str(payload.get("last_error") or "").strip()
+                if last_error and not recording and not saving:
+                    raise HTTPException(status_code=409, detail=last_error)
+            if not self._camera_recorder_is_running():
+                break
+            time.sleep(0.2)
+
+        detail = str(last_payload.get("last_error") or last_payload.get("message") or "").strip()
+        if not detail:
+            detail = self._camera_pane_tail() or "Timed out waiting for episode save before shutdown."
+        self.last_error = detail
+        raise HTTPException(status_code=409, detail=detail)
+
     def _send_teleop_command(self, command: str) -> None:
         target = self._teleop_target()
         if target is None or not self._teleop_process_is_running():
             return
         self._run_tmux("send-keys", "-t", target, command, "C-m")
+
+    def _request_teleop_force_stop(self) -> None:
+        """Ask teleop to stop the robot immediately, with Ctrl+C fallback."""
+        self._send_teleop_command("q")
+        deadline = time.time() + 0.3
+        while time.time() < deadline:
+            if not self._teleop_process_is_running():
+                return
+            time.sleep(0.05)
+        if self._teleop_process_is_running():
+            target = self._teleop_target()
+            if target is not None:
+                self._run_tmux("send-keys", "-t", target, "C-c")
+
+    def _close_tmux_session_after_camera_done(self) -> None:
+        try:
+            saved_payload = self._wait_for_camera_save_complete(timeout_s=120.0)
+            saved_episode = str(saved_payload.get("last_saved_episode") or "").strip()
+            if saved_episode:
+                self.last_saved_episode = saved_episode
+
+            if self._camera_recorder_is_running():
+                self._run_tmux("send-keys", "-t", self._camera_target(), "q", "C-m")
+            self._wait_for_pipeline_processes_to_idle(timeout_s=2.5)
+            if self._session_exists():
+                proc = self._run_tmux("kill-session", "-t", self.session_name)
+                if proc.returncode != 0:
+                    detail = self._command_error(proc, "Failed to kill tmux recording session after save.")
+                    self.last_error = detail
+                    self.last_message = detail
+                    return
+            self.last_error = ""
+            if saved_episode:
+                self.last_message = f"Saved episode {Path(saved_episode).name} and stopped the robot. You can Initialize again."
+            else:
+                self.last_message = "Saved current episode and stopped the robot. You can Initialize again."
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            self.last_error = detail
+            self.last_message = f"Robot was stopped, but episode save did not finish: {detail}"
+        except Exception as exc:
+            detail = str(exc)
+            self.last_error = detail
+            self.last_message = f"Robot was stopped, but episode save did not finish: {detail}"
+        finally:
+            self.shutdown_save_in_progress = False
 
     def initialize(self, config: RecordingInitRequest) -> dict[str, Any]:
         with self.lock:
@@ -1243,6 +1321,38 @@ class TmuxRecordingManager:
             self._send_teleop_command("d")
             return self.status()
 
+    def shutdown_after_save_async(self) -> dict[str, Any]:
+        with self.lock:
+            if not self._session_exists():
+                self.last_message = "Tmux recorder is not initialized."
+                return self.status()
+            if self.shutdown_save_in_progress:
+                self.last_message = "Robot stop requested; episode save is still running in background."
+                return self.status()
+
+            snapshot = self.status()
+            if not bool(snapshot.get("recording", False)):
+                return self.shutdown(save_current=False)
+
+            self.shutdown_save_in_progress = True
+            self.last_error = ""
+            self.last_message = "Force-stopping robot now; saving active episode in background..."
+
+            self._request_teleop_force_stop()
+            try:
+                self._send_camera_command("s", "Robot stopped; saving active episode in background...")
+            except Exception:
+                self.shutdown_save_in_progress = False
+                raise
+
+            self.shutdown_save_thread = threading.Thread(
+                target=self._close_tmux_session_after_camera_done,
+                daemon=True,
+                name="shutdown-save-waiter",
+            )
+            self.shutdown_save_thread.start()
+            return self.status()
+
     def shutdown(self, save_current: bool = True) -> dict[str, Any]:
         with self.lock:
             if not self._session_exists():
@@ -1252,9 +1362,12 @@ class TmuxRecordingManager:
             if save_current:
                 snapshot = self.status()
                 if bool(snapshot.get("recording", False)):
-                    self._send_camera_command("s", "Stopping active episode before shutdown...")
-                    self._send_teleop_command("s")
-                    time.sleep(0.2)
+                    self._request_teleop_force_stop()
+                    self._send_camera_command("s", "Robot stopped; saving active episode before shutdown...")
+                    saved_payload = self._wait_for_camera_save_complete(timeout_s=120.0)
+                    saved_episode = str(saved_payload.get("last_saved_episode") or "").strip()
+                    if saved_episode:
+                        self.last_saved_episode = saved_episode
 
             self._send_teleop_command("q")
             self._run_tmux("send-keys", "-t", self._camera_target(), "q", "C-m")
@@ -1440,6 +1553,10 @@ class TmuxRecordingManager:
                 payload.get("gripper"),
                 session_initialized=session_initialized,
             )
+
+            if self.shutdown_save_in_progress:
+                payload["saving"] = True
+                payload["message"] = self.last_message or "Robot stopped; saving active episode in background..."
 
             if payload["last_saved_episode"]:
                 self.last_saved_episode = str(payload["last_saved_episode"])
@@ -2273,6 +2390,13 @@ def recording_delete() -> JSONResponse:
 
 @app.post("/api/recording/shutdown")
 def recording_shutdown() -> JSONResponse:
+    return JSONResponse(_RECORDING_MANAGER.shutdown(save_current=False))
+
+
+@app.post("/api/recording/shutdown-save")
+def recording_shutdown_save() -> JSONResponse:
+    if hasattr(_RECORDING_MANAGER, "shutdown_after_save_async"):
+        return JSONResponse(_RECORDING_MANAGER.shutdown_after_save_async())
     return JSONResponse(_RECORDING_MANAGER.shutdown(save_current=True))
 
 

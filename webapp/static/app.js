@@ -70,6 +70,7 @@ function cacheElements() {
   els.labelSubtaskBtn = document.getElementById("labelSubtaskBtn");
   els.stopRecordingBtn = document.getElementById("stopRecordingBtn");
   els.deleteEpisodeBtn = document.getElementById("deleteEpisodeBtn");
+  els.saveShutdownRecorderBtn = document.getElementById("saveShutdownRecorderBtn");
   els.shutdownRecorderBtn = document.getElementById("shutdownRecorderBtn");
   els.handFrameCount = document.getElementById("handFrameCount");
   els.wristFrameCount = document.getElementById("wristFrameCount");
@@ -141,6 +142,7 @@ function bindEvents() {
   els.labelSubtaskBtn.addEventListener("click", () => runRecordingCommand("label"));
   els.stopRecordingBtn.addEventListener("click", () => runRecordingCommand("stop"));
   els.deleteEpisodeBtn.addEventListener("click", () => runRecordingCommand("delete"));
+  els.saveShutdownRecorderBtn.addEventListener("click", () => runRecordingCommand("shutdown-save"));
   els.shutdownRecorderBtn.addEventListener("click", () => runRecordingCommand("shutdown"));
   document.addEventListener("keydown", handleRecorderHotkeys);
 }
@@ -214,6 +216,7 @@ function handleRecorderHotkeys(event) {
     l: els.labelSubtaskBtn,
     s: els.stopRecordingBtn,
     d: els.deleteEpisodeBtn,
+    x: els.saveShutdownRecorderBtn,
     q: els.shutdownRecorderBtn,
   };
   const button = hotkeyMap[key];
@@ -918,6 +921,7 @@ function applyRecorderButtonState() {
   els.labelSubtaskBtn.disabled = busy || !initialized || !recording || saving;
   els.stopRecordingBtn.disabled = busy || !initialized || !recording || saving;
   els.deleteEpisodeBtn.disabled = busy || !initialized || recording || saving;
+  els.saveShutdownRecorderBtn.disabled = busy || !sessionInitialized || saving;
   els.shutdownRecorderBtn.disabled = busy || !sessionInitialized || saving;
 }
 
