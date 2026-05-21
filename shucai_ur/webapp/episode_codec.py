@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Lossless episode vision compressor/decompressor.
+"""Episode vision compressor/decompressor.
 
 Compress:
-  - rgb_*.npy    -> .mkv via FFV1 (lossless)
+  - rgb_*.npy    -> .mp4 via H.264
   - depth_*.npy  -> raw .mkv via FFV1 + gray16le (lossless)
 
 Decompress:
@@ -25,13 +25,13 @@ from typing import Dict, Sequence
 import numpy as np
 
 
-RGB_CODEC = "ffv1"
+RGB_CODEC = "libx264"
 DEPTH_CODEC = "ffv1"
 WEBAPP_RGB_CHANNEL_ORDER = "rgb"
 
 RGB_JOBS = (
-    ("rgb_hand", "rgb_hand.npy", "rgb_hand.mkv"),
-    ("rgb_external", "rgb_external.npy", "rgb_external.mkv"),
+    ("rgb_hand", "rgb_hand.npy", "rgb_hand.mp4"),
+    ("rgb_external", "rgb_external.npy", "rgb_external.mp4"),
 )
 DEPTH_JOBS = (
     ("depth_hand", "depth_hand.npy", "depth_hand_raw.mkv"),
@@ -293,7 +293,7 @@ def encode_rgb(
         fps=fps,
         input_pix_fmt=input_pix_fmt,
         codec=RGB_CODEC,
-        extra_args=["-pix_fmt", input_pix_fmt],
+        extra_args=["-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "20"],
     )
 
     if verify:
@@ -304,16 +304,20 @@ def encode_rgb(
             output_pix_fmt=input_pix_fmt,
             dtype=np.uint8,
         )
-        assert_lossless_roundtrip(frames, decoded, output_path.name)
+        if decoded.shape != frames.shape or decoded.dtype != frames.dtype:
+            raise RuntimeError(
+                f"{output_path.name}: decode verification failed "
+                f"({decoded.dtype} {decoded.shape} vs {frames.dtype} {frames.shape})"
+            )
 
     return vision_entry(
         path=output_path.name,
-        storage="mkv",
-        codec=RGB_CODEC,
+        storage="mp4",
+        codec="h264",
         shape=frames.shape,
         dtype=str(frames.dtype),
         fps=fps,
-        verified_lossless=verify,
+        verified_lossless=False,
         channel_order=channel_order,
     )
 
@@ -402,7 +406,7 @@ def compress_episode(
     if not wrote_any:
         raise RuntimeError(f"No rgb/depth npy files found under {episode_dir}")
 
-    metadata["vision_storage"] = "lossless-video"
+    metadata["vision_storage"] = "video"
     metadata["vision_files"] = vision_files
     metadata["vision_codec_tool"] = "webapp/episode_codec.py"
     save_metadata(episode_dir, metadata)
@@ -485,7 +489,7 @@ def decompress_episode(episode_dir: Path, *, ffmpeg_bin: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compress/decompress one episode folder losslessly in place."
+        description="Compress/decompress one episode folder in place."
     )
     parser.add_argument(
         "mode",
@@ -504,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--delete-raw",
         action="store_true",
-        help="Delete raw rgb/depth npy after verified compression.",
+        help="Delete raw rgb/depth npy after compression.",
     )
     parser.add_argument(
         "--rgb-channel-order",

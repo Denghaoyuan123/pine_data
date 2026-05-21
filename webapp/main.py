@@ -605,6 +605,8 @@ class TmuxRecordingManager:
             "stdin",
             "--status-file",
             str(self.status_file),
+            "--teleop-status-file",
+            str(self.teleop_status_file),
             "--no-delete-confirm",
             "--hand-product-ids",
             config.hand_product_ids,
@@ -1309,6 +1311,22 @@ class TmuxRecordingManager:
             else:
                 self.last_message = "Reset command sent to SpaceMouse teleop."
             return self.status()
+
+    def stop_rtde_motion(self) -> dict[str, Any]:
+        with self.lock:
+            if not self._session_exists():
+                raise HTTPException(status_code=409, detail="Tmux recording session is not initialized.")
+            if not self._teleop_process_is_running():
+                detail = "\n".join(self._capture_pane_lines(self.teleop_pane_index)[-self.status_lines:]) or "SpaceMouse teleop process is not running."
+                self.last_error = detail
+                raise HTTPException(status_code=409, detail=detail)
+            self._send_teleop_command("u")
+            self.last_message = "Local SpaceMouse clear command sent; current episode recording continues."
+            return self.status()
+
+    def reconnect_rtde(self) -> dict[str, Any]:
+        # Backward-compatible endpoint name: U is now a light speedStop, not a full RTDE reconnect.
+        return self.stop_rtde_motion()
 
     def label_subtask(self) -> dict[str, Any]:
         with self.lock:
@@ -2376,6 +2394,20 @@ def recording_stop() -> JSONResponse:
 @app.post("/api/recording/reset")
 def recording_reset(payload: RecordingResetRequest | None = None) -> JSONResponse:
     return JSONResponse(_RECORDING_MANAGER.reset_pose(reset_config=payload))
+
+
+@app.post("/api/recording/stop-rtde-motion")
+def recording_stop_rtde_motion() -> JSONResponse:
+    if not hasattr(_RECORDING_MANAGER, "stop_rtde_motion"):
+        raise HTTPException(status_code=409, detail="UR speedStop is only available for the SpaceMouse tmux backend.")
+    return JSONResponse(_RECORDING_MANAGER.stop_rtde_motion())
+
+
+@app.post("/api/recording/reconnect-rtde")
+def recording_reconnect_rtde() -> JSONResponse:
+    if not hasattr(_RECORDING_MANAGER, "reconnect_rtde"):
+        raise HTTPException(status_code=409, detail="UR speedStop is only available for the SpaceMouse tmux backend.")
+    return JSONResponse(_RECORDING_MANAGER.reconnect_rtde())
 
 
 @app.post("/api/recording/label")
