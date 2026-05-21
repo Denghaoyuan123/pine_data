@@ -459,16 +459,6 @@ class CameraRecorder():
                 [
                     {
                         "key": "rgb_hand",
-                        "filename": "rgb_hand.mkv",
-                        "width": self.width_hand,
-                        "height": self.height_hand,
-                        "fps": self.fps_hand,
-                        "input_pixel_format": "rgb24",
-                        "codec": "ffv1",
-                        "output_pixel_format": "rgb24",
-                    },
-                    {
-                        "key": "rgb_hand_mp4",
                         "filename": "rgb_hand.mp4",
                         "width": self.width_hand,
                         "height": self.height_hand,
@@ -495,16 +485,6 @@ class CameraRecorder():
                 [
                     {
                         "key": "rgb_external",
-                        "filename": "rgb_external.mkv",
-                        "width": self.width_ext,
-                        "height": self.height_ext,
-                        "fps": self.fps_ext,
-                        "input_pixel_format": "rgb24",
-                        "codec": "ffv1",
-                        "output_pixel_format": "rgb24",
-                    },
-                    {
-                        "key": "rgb_external_mp4",
                         "filename": "rgb_external.mp4",
                         "width": self.width_ext,
                         "height": self.height_ext,
@@ -579,17 +559,11 @@ class CameraRecorder():
             writer = self._episode_video_writers.get("rgb_hand")
             if writer is not None:
                 writer.write(color_hand_image)
-            writer = self._episode_video_writers.get("rgb_hand_mp4")
-            if writer is not None:
-                writer.write(color_hand_image)
             writer = self._episode_video_writers.get("depth_hand")
             if writer is not None:
                 writer.write(depth_hand_image)
         if color_ext_image is not None and depth_ext_image is not None:
             writer = self._episode_video_writers.get("rgb_external")
-            if writer is not None:
-                writer.write(color_ext_image)
-            writer = self._episode_video_writers.get("rgb_external_mp4")
             if writer is not None:
                 writer.write(color_ext_image)
             writer = self._episode_video_writers.get("depth_external")
@@ -2107,21 +2081,11 @@ class CameraRecorder():
             'teleop_command_source': str(self.teleop_status_file) if has_teleop_command_source else '',
             'subtask_timestamps': subtask_timestamps.tolist(),
             'subtask_labels': int(len(subtask_timestamps)),
-            'vision_storage': 'lossless-video+mp4',
+            'vision_storage': 'video',
         }
         vision_files = {}
         if len(timestamps_hand) > 0:
             vision_files["rgb_hand"] = _vision_entry(
-                path="rgb_hand.mkv",
-                storage="mkv",
-                codec="ffv1",
-                shape=(len(timestamps_hand), self.height_hand, self.width_hand, 3),
-                dtype="uint8",
-                fps=self.fps_hand,
-                channel_order="rgb",
-                verified_lossless=True,
-            )
-            vision_files["rgb_hand_mp4"] = _vision_entry(
                 path="rgb_hand.mp4",
                 storage="mp4",
                 codec="h264",
@@ -2141,16 +2105,6 @@ class CameraRecorder():
             )
         if len(timestamps_ext) > 0:
             vision_files["rgb_external"] = _vision_entry(
-                path="rgb_external.mkv",
-                storage="mkv",
-                codec="ffv1",
-                shape=(len(timestamps_ext), self.height_ext, self.width_ext, 3),
-                dtype="uint8",
-                fps=self.fps_ext,
-                channel_order="rgb",
-                verified_lossless=True,
-            )
-            vision_files["rgb_external_mp4"] = _vision_entry(
                 path="rgb_external.mp4",
                 storage="mp4",
                 codec="h264",
@@ -2177,7 +2131,6 @@ class CameraRecorder():
 
         if len(timestamps_hand) > 0:
             print(f"Saved hand camera frames: {len(timestamps_hand)}")
-            print(f"  RGB MKV: {os.path.join(episode_folder, 'rgb_hand.mkv')}")
             print(f"  RGB MP4: {os.path.join(episode_folder, 'rgb_hand.mp4')}")
             print(f"  Depth: {os.path.join(episode_folder, 'depth_hand_raw.mkv')}")
             print(f"  Timestamps: {timestamp_hand_file}")
@@ -2186,7 +2139,6 @@ class CameraRecorder():
 
         if len(timestamps_ext) > 0:
             print(f"\nSaved external camera frames: {len(timestamps_ext)}")
-            print(f"  RGB MKV: {os.path.join(episode_folder, 'rgb_external.mkv')}")
             print(f"  RGB MP4: {os.path.join(episode_folder, 'rgb_external.mp4')}")
             print(f"  Depth: {os.path.join(episode_folder, 'depth_external_raw.mkv')}")
             print(f"  Timestamps: {timestamp_ext_file}")

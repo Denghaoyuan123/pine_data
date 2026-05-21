@@ -199,6 +199,7 @@
                 <li>Watch the RGB preview windows to confirm the cameras are live.</li>
                 <li>Press `Initialize` to start or reconnect the SpaceMouse teleop + recorder pipeline. Keyboard: `i`.</li>
                 <li>Press `Reset` to move the arm to the configured home position. Keyboard: `Ctrl+r`.</li>
+                <li>Press `Stop drift` if the arm drifts or ignores zero SpaceMouse input; the current episode keeps recording. Keyboard: `u`.</li>
                 <li>Teleoperate the arm only after the robot and cameras look healthy in the status area.</li>
                 <li>Press `Start episode` to begin a new recording using the current instruction text. Keyboard: `c`.</li>
                 <li>Press `Label subtask` whenever you want to mark a subtask boundary inside the current episode. Keyboard: `l`.</li>
@@ -224,6 +225,7 @@
           <div class="button-row command-row">
             <button id="initializeSpacemouseBtn" class="button" title="Keyboard shortcut: I" aria-keyshortcuts="I">Initialize (<strong>I</strong>)</button>
             <button id="resetRecorderBtn" class="button button-secondary" title="Keyboard shortcut: Ctrl+R" aria-keyshortcuts="Control+R">Reset (<strong>Ctrl+R</strong>)</button>
+            <button id="reconnectRtdeBtn" class="button button-secondary" title="Keyboard shortcut: U" aria-keyshortcuts="U">Stop drift (<strong>U</strong>)</button>
             <button id="startRecordingBtn" class="button button-secondary" title="Keyboard shortcut: C" aria-keyshortcuts="C">Start episode (<strong>C</strong>)</button>
             <button id="labelSubtaskBtn" class="button button-secondary" title="Keyboard shortcut: L" aria-keyshortcuts="L">Label subtask (<strong>L</strong>)</button>
             <button id="stopRecordingBtn" class="button button-secondary" title="Keyboard shortcut: S" aria-keyshortcuts="S">Stop and save (<strong>S</strong>)</button>

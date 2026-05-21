@@ -66,6 +66,7 @@ function cacheElements() {
   els.recorderMessage = document.getElementById("recorderMessage");
   els.initializeSpacemouseBtn = document.getElementById("initializeSpacemouseBtn");
   els.resetRecorderBtn = document.getElementById("resetRecorderBtn");
+  els.reconnectRtdeBtn = document.getElementById("reconnectRtdeBtn");
   els.startRecordingBtn = document.getElementById("startRecordingBtn");
   els.labelSubtaskBtn = document.getElementById("labelSubtaskBtn");
   els.stopRecordingBtn = document.getElementById("stopRecordingBtn");
@@ -138,6 +139,7 @@ function bindEvents() {
   els.nextFrameBtn.addEventListener("click", () => stepFrame(1));
   els.initializeSpacemouseBtn.addEventListener("click", () => runRecordingInitialize("spacemouse"));
   els.resetRecorderBtn.addEventListener("click", () => runRecordingCommand("reset"));
+  els.reconnectRtdeBtn.addEventListener("click", () => runRecordingCommand("stop-rtde-motion"));
   els.startRecordingBtn.addEventListener("click", () => runRecordingCommand("start"));
   els.labelSubtaskBtn.addEventListener("click", () => runRecordingCommand("label"));
   els.stopRecordingBtn.addEventListener("click", () => runRecordingCommand("stop"));
@@ -212,6 +214,7 @@ function handleRecorderHotkeys(event) {
   const hotkeyMap = {
     i: els.initializeSpacemouseBtn,
     r: els.resetRecorderBtn,
+    u: els.reconnectRtdeBtn,
     c: els.startRecordingBtn,
     l: els.labelSubtaskBtn,
     s: els.stopRecordingBtn,
@@ -918,6 +921,7 @@ function applyRecorderButtonState() {
 
   els.startRecordingBtn.disabled = busy || !initialized || recording || saving;
   els.resetRecorderBtn.disabled = busy || !sessionInitialized || saving || !resetSupported;
+  els.reconnectRtdeBtn.disabled = busy || !sessionInitialized || saving || !resetSupported;
   els.labelSubtaskBtn.disabled = busy || !initialized || !recording || saving;
   els.stopRecordingBtn.disabled = busy || !initialized || !recording || saving;
   els.deleteEpisodeBtn.disabled = busy || !initialized || recording || saving;
