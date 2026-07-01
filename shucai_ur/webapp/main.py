@@ -104,14 +104,19 @@ class RecordingInitRequest(BaseModel):
     root: str = Field(default=str(DEFAULT_RECORD_ROOT))
     instruction: str = Field(default="untitled")
     hand_serial: str = os.getenv("HAND_SERIAL", "218622270687")
+    wrist_serial: str = os.getenv("WRIST_SERIAL", "409122273232")
     external_serial: str = os.getenv("EXTERNAL_SERIAL", "409122274280")
     allow_missing_hand: bool = _env_bool("ALLOW_MISSING_HAND", False)
+    allow_missing_wrist: bool = _env_bool("ALLOW_MISSING_WRIST", False)
     allow_missing_external: bool = _env_bool("ALLOW_MISSING_EXTERNAL", False)
     hand_product_ids: str = "0B5B"
+    wrist_product_ids: str = "0B5B"
     external_product_ids: str = "0B5B"
     fps: int = Field(default=15, ge=1, le=60)
     hand_width: int = Field(default=640, ge=160, le=4096)
     hand_height: int = Field(default=480, ge=120, le=4096)
+    wrist_width: int = Field(default=640, ge=160, le=4096)
+    wrist_height: int = Field(default=480, ge=120, le=4096)
     external_width: int = Field(default=848, ge=160, le=4096)
     external_height: int = Field(default=480, ge=120, le=4096)
     camera_start_retries: int = Field(default=20, ge=0, le=200)
@@ -184,14 +189,19 @@ class RecordingManager:
 
             recorder = module.CameraRecorder(
                 hand_serial_override=config.hand_serial.strip() or None,
+                wrist_serial_override=config.wrist_serial.strip() or None,
                 external_serial_override=config.external_serial.strip() or None,
                 allow_missing_hand=config.allow_missing_hand,
+                allow_missing_wrist=config.allow_missing_wrist,
                 allow_missing_external=config.allow_missing_external,
                 hand_product_ids=module.parse_pid_csv(config.hand_product_ids),
+                wrist_product_ids=module.parse_pid_csv(config.wrist_product_ids),
                 external_product_ids=module.parse_pid_csv(config.external_product_ids),
                 capture_fps=config.fps,
                 hand_width=config.hand_width,
                 hand_height=config.hand_height,
+                wrist_width=config.wrist_width,
+                wrist_height=config.wrist_height,
                 external_width=config.external_width,
                 external_height=config.external_height,
                 camera_start_retries=config.camera_start_retries,
@@ -365,6 +375,7 @@ class RecordingManager:
             initialized = recorder is not None and module is not None
             counts = {
                 "hand_frames": len(getattr(module, "timestamp_hand_array", [])) if module else 0,
+                "wrist_frames": len(getattr(module, "timestamp_wrist_array", [])) if module else 0,
                 "external_frames": len(getattr(module, "timestamp_ext_array", [])) if module else 0,
                 "robot_frames": len(getattr(module, "robot_timestamp_array", [])) if module else 0,
             }
@@ -389,6 +400,18 @@ class RecordingManager:
                         "status": "disconnected",
                         "width": self.config.hand_width if self.config is not None else 640,
                         "height": self.config.hand_height if self.config is not None else 480,
+                    },
+                ),
+                "wrist_camera": input_status.get(
+                    "wrist_camera",
+                    {
+                        "requested": True,
+                        "enabled": False,
+                        "connected": False,
+                        "available": False,
+                        "status": "disconnected",
+                        "width": self.config.wrist_width if self.config is not None else 640,
+                        "height": self.config.wrist_height if self.config is not None else 480,
                     },
                 ),
                 "external_camera": input_status.get(
@@ -449,6 +472,8 @@ class TmuxRecordingManager:
         ).expanduser().resolve()
         self.pipeline_profiles = self._build_pipeline_profiles()
         self.active_pipeline = "spacemouse"
+        self.shutdown_save_in_progress = False
+        self.shutdown_save_thread: threading.Thread | None = None
         self._set_active_pipeline(self.active_pipeline)
 
     def _build_pipeline_profiles(self) -> dict[str, dict[str, Any]]:
@@ -486,6 +511,10 @@ class TmuxRecordingManager:
         default_teleop_status = BASE_DIR / ".runtime" / f"{self.session_name}_teleop_status.json"
         self.teleop_status_file = Path(str(profile.get("teleop_status_file", default_teleop_status))).expanduser().resolve()
         self.preview_dir = self.status_file.with_name(f"{self.status_file.stem}_previews")
+        if not hasattr(self, "shutdown_save_in_progress"):
+            self.shutdown_save_in_progress = False
+        if not hasattr(self, "shutdown_save_thread"):
+            self.shutdown_save_thread = None
 
     def _detect_running_pipeline(self) -> str | None:
         for pipeline in [self.active_pipeline, *[name for name in self.pipeline_profiles if name != self.active_pipeline]]:
@@ -562,6 +591,10 @@ class TmuxRecordingManager:
             str(config.hand_width),
             "--hand-height",
             str(config.hand_height),
+            "--wrist-width",
+            str(config.wrist_width),
+            "--wrist-height",
+            str(config.wrist_height),
             "--external-width",
             str(config.external_width),
             "--external-height",
@@ -572,9 +605,13 @@ class TmuxRecordingManager:
             "stdin",
             "--status-file",
             str(self.status_file),
+            "--teleop-status-file",
+            str(self.teleop_status_file),
             "--no-delete-confirm",
             "--hand-product-ids",
             config.hand_product_ids,
+            "--wrist-product-ids",
+            config.wrist_product_ids,
             "--external-product-ids",
             config.external_product_ids,
             "--camera-start-retries",
@@ -587,10 +624,14 @@ class TmuxRecordingManager:
         ]
         if config.hand_serial.strip():
             args.extend(["--hand-serial", config.hand_serial.strip()])
+        if config.wrist_serial.strip():
+            args.extend(["--wrist-serial", config.wrist_serial.strip()])
         if config.external_serial.strip():
             args.extend(["--external-serial", config.external_serial.strip()])
         if config.allow_missing_hand:
             args.append("--allow-missing-hand")
+        if config.allow_missing_wrist:
+            args.append("--allow-missing-wrist")
         if config.allow_missing_external:
             args.append("--allow-missing-external")
         robot_ip = config.robot_ip.strip()
@@ -710,7 +751,7 @@ class TmuxRecordingManager:
                 continue
 
             connected_roles: list[str] = []
-            for role, key in (("hand", "hand_camera"), ("external", "external_camera")):
+            for role, key in (("hand", "hand_camera"), ("wrist", "wrist_camera"), ("external", "external_camera")):
                 source = status_payload.get(key)
                 if isinstance(source, dict) and bool(source.get("connected") or source.get("enabled")):
                     connected_roles.append(role)
@@ -977,6 +1018,10 @@ class TmuxRecordingManager:
             str(config.hand_width),
             "--hand-height",
             str(config.hand_height),
+            "--wrist-width",
+            str(config.wrist_width),
+            "--wrist-height",
+            str(config.wrist_height),
             "--external-width",
             str(config.external_width),
             "--external-height",
@@ -988,6 +1033,8 @@ class TmuxRecordingManager:
             "--no-delete-confirm",
             "--hand-product-ids",
             config.hand_product_ids,
+            "--wrist-product-ids",
+            config.wrist_product_ids,
             "--external-product-ids",
             config.external_product_ids,
             "--camera-start-retries",
@@ -1023,8 +1070,10 @@ class TmuxRecordingManager:
             "RECORD_ROOT": str(Path(config.root).expanduser().resolve()),
             "FPS": str(config.fps),
             "HAND_SERIAL": config.hand_serial.strip(),
+            "WRIST_SERIAL": config.wrist_serial.strip(),
             "EXTERNAL_SERIAL": config.external_serial.strip(),
             "ALLOW_MISSING_HAND": "1" if config.allow_missing_hand else "0",
+            "ALLOW_MISSING_WRIST": "1" if config.allow_missing_wrist else "0",
             "ALLOW_MISSING_EXTERNAL": "1" if config.allow_missing_external else "0",
             "ROBOT_FPS": str(config.robot_fps),
             "ENABLE_GRIPPER_STATE": "1" if config.enable_gripper_state else "0",
@@ -1067,11 +1116,92 @@ class TmuxRecordingManager:
         command = self._pane_current_command(self.teleop_pane_index)
         return bool(command) and command not in {"bash", "zsh", "sh", "fish"}
 
+    def _wait_for_pipeline_processes_to_idle(self, timeout_s: float = 2.5) -> None:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            teleop_running = self._teleop_process_is_running()
+            camera_running = self._camera_recorder_is_running()
+            if not teleop_running and not camera_running:
+                return
+            time.sleep(0.1)
+
+    def _wait_for_camera_save_complete(self, timeout_s: float = 120.0) -> dict[str, Any]:
+        deadline = time.time() + timeout_s
+        last_payload: dict[str, Any] = {}
+        while time.time() < deadline:
+            payload = self._load_status_file()
+            if payload:
+                last_payload = payload
+                recording = bool(payload.get("recording", False))
+                saving = bool(payload.get("saving", False))
+                last_saved = str(payload.get("last_saved_episode") or "").strip()
+                message = str(payload.get("message") or "")
+                if not recording and not saving and (last_saved or message.startswith("Saved episode")):
+                    return payload
+                last_error = str(payload.get("last_error") or "").strip()
+                if last_error and not recording and not saving:
+                    raise HTTPException(status_code=409, detail=last_error)
+            if not self._camera_recorder_is_running():
+                break
+            time.sleep(0.2)
+
+        detail = str(last_payload.get("last_error") or last_payload.get("message") or "").strip()
+        if not detail:
+            detail = self._camera_pane_tail() or "Timed out waiting for episode save before shutdown."
+        self.last_error = detail
+        raise HTTPException(status_code=409, detail=detail)
+
     def _send_teleop_command(self, command: str) -> None:
         target = self._teleop_target()
         if target is None or not self._teleop_process_is_running():
             return
         self._run_tmux("send-keys", "-t", target, command, "C-m")
+
+    def _request_teleop_force_stop(self) -> None:
+        """Ask teleop to stop the robot immediately, with Ctrl+C fallback."""
+        self._send_teleop_command("q")
+        deadline = time.time() + 0.3
+        while time.time() < deadline:
+            if not self._teleop_process_is_running():
+                return
+            time.sleep(0.05)
+        if self._teleop_process_is_running():
+            target = self._teleop_target()
+            if target is not None:
+                self._run_tmux("send-keys", "-t", target, "C-c")
+
+    def _close_tmux_session_after_camera_done(self) -> None:
+        try:
+            saved_payload = self._wait_for_camera_save_complete(timeout_s=120.0)
+            saved_episode = str(saved_payload.get("last_saved_episode") or "").strip()
+            if saved_episode:
+                self.last_saved_episode = saved_episode
+
+            if self._camera_recorder_is_running():
+                self._run_tmux("send-keys", "-t", self._camera_target(), "q", "C-m")
+            self._wait_for_pipeline_processes_to_idle(timeout_s=2.5)
+            if self._session_exists():
+                proc = self._run_tmux("kill-session", "-t", self.session_name)
+                if proc.returncode != 0:
+                    detail = self._command_error(proc, "Failed to kill tmux recording session after save.")
+                    self.last_error = detail
+                    self.last_message = detail
+                    return
+            self.last_error = ""
+            if saved_episode:
+                self.last_message = f"Saved episode {Path(saved_episode).name} and stopped the robot. You can Initialize again."
+            else:
+                self.last_message = "Saved current episode and stopped the robot. You can Initialize again."
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            self.last_error = detail
+            self.last_message = f"Robot was stopped, but episode save did not finish: {detail}"
+        except Exception as exc:
+            detail = str(exc)
+            self.last_error = detail
+            self.last_message = f"Robot was stopped, but episode save did not finish: {detail}"
+        finally:
+            self.shutdown_save_in_progress = False
 
     def initialize(self, config: RecordingInitRequest) -> dict[str, Any]:
         with self.lock:
@@ -1182,6 +1312,22 @@ class TmuxRecordingManager:
                 self.last_message = "Reset command sent to SpaceMouse teleop."
             return self.status()
 
+    def stop_rtde_motion(self) -> dict[str, Any]:
+        with self.lock:
+            if not self._session_exists():
+                raise HTTPException(status_code=409, detail="Tmux recording session is not initialized.")
+            if not self._teleop_process_is_running():
+                detail = "\n".join(self._capture_pane_lines(self.teleop_pane_index)[-self.status_lines:]) or "SpaceMouse teleop process is not running."
+                self.last_error = detail
+                raise HTTPException(status_code=409, detail=detail)
+            self._send_teleop_command("u")
+            self.last_message = "Local SpaceMouse clear command sent; current episode recording continues."
+            return self.status()
+
+    def reconnect_rtde(self) -> dict[str, Any]:
+        # Backward-compatible endpoint name: U is now a light speedStop, not a full RTDE reconnect.
+        return self.stop_rtde_motion()
+
     def label_subtask(self) -> dict[str, Any]:
         with self.lock:
             self._send_camera_command("l", "Subtask label command sent to camera recorder.")
@@ -1193,6 +1339,38 @@ class TmuxRecordingManager:
             self._send_teleop_command("d")
             return self.status()
 
+    def shutdown_after_save_async(self) -> dict[str, Any]:
+        with self.lock:
+            if not self._session_exists():
+                self.last_message = "Tmux recorder is not initialized."
+                return self.status()
+            if self.shutdown_save_in_progress:
+                self.last_message = "Robot stop requested; episode save is still running in background."
+                return self.status()
+
+            snapshot = self.status()
+            if not bool(snapshot.get("recording", False)):
+                return self.shutdown(save_current=False)
+
+            self.shutdown_save_in_progress = True
+            self.last_error = ""
+            self.last_message = "Force-stopping robot now; saving active episode in background..."
+
+            self._request_teleop_force_stop()
+            try:
+                self._send_camera_command("s", "Robot stopped; saving active episode in background...")
+            except Exception:
+                self.shutdown_save_in_progress = False
+                raise
+
+            self.shutdown_save_thread = threading.Thread(
+                target=self._close_tmux_session_after_camera_done,
+                daemon=True,
+                name="shutdown-save-waiter",
+            )
+            self.shutdown_save_thread.start()
+            return self.status()
+
     def shutdown(self, save_current: bool = True) -> dict[str, Any]:
         with self.lock:
             if not self._session_exists():
@@ -1202,13 +1380,21 @@ class TmuxRecordingManager:
             if save_current:
                 snapshot = self.status()
                 if bool(snapshot.get("recording", False)):
-                    self._send_camera_command("s", "Stopping active episode before shutdown...")
-                    self._send_teleop_command("s")
-                    time.sleep(0.2)
+                    self._request_teleop_force_stop()
+                    self._send_camera_command("s", "Robot stopped; saving active episode before shutdown...")
+                    saved_payload = self._wait_for_camera_save_complete(timeout_s=120.0)
+                    saved_episode = str(saved_payload.get("last_saved_episode") or "").strip()
+                    if saved_episode:
+                        self.last_saved_episode = saved_episode
 
             self._send_teleop_command("q")
             self._run_tmux("send-keys", "-t", self._camera_target(), "q", "C-m")
-            time.sleep(0.2)
+            self._wait_for_pipeline_processes_to_idle(timeout_s=2.5)
+            if self._teleop_process_is_running():
+                target = self._teleop_target()
+                if target is not None:
+                    self._run_tmux("send-keys", "-t", target, "C-c")
+                self._wait_for_pipeline_processes_to_idle(timeout_s=1.0)
             proc = self._run_tmux("kill-session", "-t", self.session_name)
             if proc.returncode != 0:
                 detail = self._command_error(proc, "Failed to kill tmux recording session.")
@@ -1236,6 +1422,7 @@ class TmuxRecordingManager:
                 "last_saved_episode": self.last_saved_episode,
                 "counts": {
                     "hand_frames": 0,
+                    "wrist_frames": 0,
                     "external_frames": 0,
                     "robot_frames": 0,
                 },
@@ -1247,6 +1434,16 @@ class TmuxRecordingManager:
                     "status": "disconnected",
                     "width": effective_config.hand_width,
                     "height": effective_config.hand_height,
+                    "fps": effective_config.fps,
+                },
+                "wrist_camera": {
+                    "requested": True,
+                    "enabled": False,
+                    "connected": False,
+                    "available": False,
+                    "status": "disconnected",
+                    "width": effective_config.wrist_width,
+                    "height": effective_config.wrist_height,
                     "fps": effective_config.fps,
                 },
                 "external_camera": {
@@ -1321,6 +1518,8 @@ class TmuxRecordingManager:
                     payload["counts"] = status_payload["counts"]
                 if isinstance(status_payload.get("hand_camera"), dict):
                     payload["hand_camera"] = status_payload["hand_camera"]
+                if isinstance(status_payload.get("wrist_camera"), dict):
+                    payload["wrist_camera"] = status_payload["wrist_camera"]
                 if isinstance(status_payload.get("external_camera"), dict):
                     payload["external_camera"] = status_payload["external_camera"]
                 if isinstance(status_payload.get("robot"), dict):
@@ -1354,6 +1553,11 @@ class TmuxRecordingManager:
                 session_initialized=session_initialized,
                 camera_role="hand",
             )
+            payload["wrist_camera"] = self._normalized_camera_source(
+                payload.get("wrist_camera"),
+                session_initialized=session_initialized,
+                camera_role="wrist",
+            )
             payload["external_camera"] = self._normalized_camera_source(
                 payload.get("external_camera"),
                 session_initialized=session_initialized,
@@ -1368,6 +1572,10 @@ class TmuxRecordingManager:
                 session_initialized=session_initialized,
             )
 
+            if self.shutdown_save_in_progress:
+                payload["saving"] = True
+                payload["message"] = self.last_message or "Robot stopped; saving active episode in background..."
+
             if payload["last_saved_episode"]:
                 self.last_saved_episode = str(payload["last_saved_episode"])
             if not session_initialized:
@@ -1378,6 +1586,7 @@ class TmuxRecordingManager:
                 payload["current_episode_folder"] = None
                 payload["counts"] = {
                     "hand_frames": 0,
+                    "wrist_frames": 0,
                     "external_frames": 0,
                     "robot_frames": 0,
                     "subtask_labels": 0,
@@ -2187,6 +2396,20 @@ def recording_reset(payload: RecordingResetRequest | None = None) -> JSONRespons
     return JSONResponse(_RECORDING_MANAGER.reset_pose(reset_config=payload))
 
 
+@app.post("/api/recording/stop-rtde-motion")
+def recording_stop_rtde_motion() -> JSONResponse:
+    if not hasattr(_RECORDING_MANAGER, "stop_rtde_motion"):
+        raise HTTPException(status_code=409, detail="UR speedStop is only available for the SpaceMouse tmux backend.")
+    return JSONResponse(_RECORDING_MANAGER.stop_rtde_motion())
+
+
+@app.post("/api/recording/reconnect-rtde")
+def recording_reconnect_rtde() -> JSONResponse:
+    if not hasattr(_RECORDING_MANAGER, "reconnect_rtde"):
+        raise HTTPException(status_code=409, detail="UR speedStop is only available for the SpaceMouse tmux backend.")
+    return JSONResponse(_RECORDING_MANAGER.reconnect_rtde())
+
+
 @app.post("/api/recording/label")
 def recording_label() -> JSONResponse:
     return JSONResponse(_RECORDING_MANAGER.label_subtask())
@@ -2199,12 +2422,19 @@ def recording_delete() -> JSONResponse:
 
 @app.post("/api/recording/shutdown")
 def recording_shutdown() -> JSONResponse:
+    return JSONResponse(_RECORDING_MANAGER.shutdown(save_current=False))
+
+
+@app.post("/api/recording/shutdown-save")
+def recording_shutdown_save() -> JSONResponse:
+    if hasattr(_RECORDING_MANAGER, "shutdown_after_save_async"):
+        return JSONResponse(_RECORDING_MANAGER.shutdown_after_save_async())
     return JSONResponse(_RECORDING_MANAGER.shutdown(save_current=True))
 
 
 @app.get("/api/recording/frame")
 def recording_frame(
-    camera: str = Query(..., pattern="^(hand|external)$"),
+    camera: str = Query(..., pattern="^(hand|wrist|external)$"),
     kind: str = Query(..., pattern="^(rgb|depth)$"),
     max_width: int | None = Query(default=640, ge=1, le=4096),
 ) -> Response:

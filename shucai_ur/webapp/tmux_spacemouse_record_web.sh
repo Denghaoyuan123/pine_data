@@ -38,8 +38,10 @@ RECORD_ROOT="${RECORD_ROOT:-${PINE_DIR}/recordings}"
 FPS="${FPS:-15}"
 
 HAND_SERIAL="${HAND_SERIAL:-}"
+WRIST_SERIAL="${WRIST_SERIAL:-}"
 EXTERNAL_SERIAL="${EXTERNAL_SERIAL:-}"
 ALLOW_MISSING_HAND="${ALLOW_MISSING_HAND:-0}"
+ALLOW_MISSING_WRIST="${ALLOW_MISSING_WRIST:-0}"
 ALLOW_MISSING_EXTERNAL="${ALLOW_MISSING_EXTERNAL:-0}"
 
 TELEOP_EXTRA_ARGS="${TELEOP_EXTRA_ARGS:-}"
@@ -92,11 +94,17 @@ camera_cmd="source \"${CAMERA_ENV}/bin/activate\" && cd \"${WEBAPP_DIR}\" && pyt
 if [[ -n "$HAND_SERIAL" ]]; then
   camera_cmd+=" --hand-serial \"${HAND_SERIAL}\""
 fi
+if [[ -n "$WRIST_SERIAL" ]]; then
+  camera_cmd+=" --wrist-serial \"${WRIST_SERIAL}\""
+fi
 if [[ -n "$EXTERNAL_SERIAL" ]]; then
   camera_cmd+=" --external-serial \"${EXTERNAL_SERIAL}\""
 fi
 if [[ "$ALLOW_MISSING_HAND" == "1" ]]; then
   camera_cmd+=" --allow-missing-hand"
+fi
+if [[ "$ALLOW_MISSING_WRIST" == "1" ]]; then
+  camera_cmd+=" --allow-missing-wrist"
 fi
 if [[ "$ALLOW_MISSING_EXTERNAL" == "1" ]]; then
   camera_cmd+=" --allow-missing-external"

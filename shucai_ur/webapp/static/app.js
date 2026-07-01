@@ -66,12 +66,15 @@ function cacheElements() {
   els.recorderMessage = document.getElementById("recorderMessage");
   els.initializeSpacemouseBtn = document.getElementById("initializeSpacemouseBtn");
   els.resetRecorderBtn = document.getElementById("resetRecorderBtn");
+  els.reconnectRtdeBtn = document.getElementById("reconnectRtdeBtn");
   els.startRecordingBtn = document.getElementById("startRecordingBtn");
   els.labelSubtaskBtn = document.getElementById("labelSubtaskBtn");
   els.stopRecordingBtn = document.getElementById("stopRecordingBtn");
   els.deleteEpisodeBtn = document.getElementById("deleteEpisodeBtn");
+  els.saveShutdownRecorderBtn = document.getElementById("saveShutdownRecorderBtn");
   els.shutdownRecorderBtn = document.getElementById("shutdownRecorderBtn");
   els.handFrameCount = document.getElementById("handFrameCount");
+  els.wristFrameCount = document.getElementById("wristFrameCount");
   els.externalFrameCount = document.getElementById("externalFrameCount");
   els.robotFrameCount = document.getElementById("robotFrameCount");
   els.subtaskLabelCount = document.getElementById("subtaskLabelCount");
@@ -80,11 +83,15 @@ function cacheElements() {
   els.fpsInput = document.getElementById("fpsInput");
   els.handWidthInput = document.getElementById("handWidthInput");
   els.handHeightInput = document.getElementById("handHeightInput");
+  els.wristWidthInput = document.getElementById("wristWidthInput");
+  els.wristHeightInput = document.getElementById("wristHeightInput");
   els.externalWidthInput = document.getElementById("externalWidthInput");
   els.externalHeightInput = document.getElementById("externalHeightInput");
   els.handSerialInput = document.getElementById("handSerialInput");
+  els.wristSerialInput = document.getElementById("wristSerialInput");
   els.externalSerialInput = document.getElementById("externalSerialInput");
   els.handProductIdsInput = document.getElementById("handProductIdsInput");
+  els.wristProductIdsInput = document.getElementById("wristProductIdsInput");
   els.externalProductIdsInput = document.getElementById("externalProductIdsInput");
   els.cameraStartRetriesInput = document.getElementById("cameraStartRetriesInput");
   els.cameraStartRetryDelayInput = document.getElementById("cameraStartRetryDelayInput");
@@ -96,10 +103,12 @@ function cacheElements() {
   els.subtaskResetNoiseInput = document.getElementById("subtaskResetNoiseInput");
   els.cameraBusyResetCheckbox = document.getElementById("cameraBusyResetCheckbox");
   els.handSourceBadge = document.getElementById("handSourceBadge");
+  els.wristSourceBadge = document.getElementById("wristSourceBadge");
   els.externalSourceBadge = document.getElementById("externalSourceBadge");
   els.robotSourceBadge = document.getElementById("robotSourceBadge");
   els.gripperSourceBadge = document.getElementById("gripperSourceBadge");
   els.liveHandRgb = document.getElementById("liveHandRgb");
+  els.liveWristRgb = document.getElementById("liveWristRgb");
   els.liveExternalRgb = document.getElementById("liveExternalRgb");
   els.robotLivePreview = document.getElementById("robotLivePreview");
   els.gripperLivePreview = document.getElementById("gripperLivePreview");
@@ -130,10 +139,12 @@ function bindEvents() {
   els.nextFrameBtn.addEventListener("click", () => stepFrame(1));
   els.initializeSpacemouseBtn.addEventListener("click", () => runRecordingInitialize("spacemouse"));
   els.resetRecorderBtn.addEventListener("click", () => runRecordingCommand("reset"));
+  els.reconnectRtdeBtn.addEventListener("click", () => runRecordingCommand("stop-rtde-motion"));
   els.startRecordingBtn.addEventListener("click", () => runRecordingCommand("start"));
   els.labelSubtaskBtn.addEventListener("click", () => runRecordingCommand("label"));
   els.stopRecordingBtn.addEventListener("click", () => runRecordingCommand("stop"));
   els.deleteEpisodeBtn.addEventListener("click", () => runRecordingCommand("delete"));
+  els.saveShutdownRecorderBtn.addEventListener("click", () => runRecordingCommand("shutdown-save"));
   els.shutdownRecorderBtn.addEventListener("click", () => runRecordingCommand("shutdown"));
   document.addEventListener("keydown", handleRecorderHotkeys);
 }
@@ -203,10 +214,12 @@ function handleRecorderHotkeys(event) {
   const hotkeyMap = {
     i: els.initializeSpacemouseBtn,
     r: els.resetRecorderBtn,
+    u: els.reconnectRtdeBtn,
     c: els.startRecordingBtn,
     l: els.labelSubtaskBtn,
     s: els.stopRecordingBtn,
     d: els.deleteEpisodeBtn,
+    x: els.saveShutdownRecorderBtn,
     q: els.shutdownRecorderBtn,
   };
   const button = hotkeyMap[key];
@@ -792,11 +805,15 @@ function populateRecordingForm(config) {
   els.fpsInput.value = config.fps ?? 15;
   els.handWidthInput.value = config.hand_width ?? 640;
   els.handHeightInput.value = config.hand_height ?? 480;
-  els.externalWidthInput.value = config.external_width ?? 1280;
-  els.externalHeightInput.value = config.external_height ?? 720;
+  els.wristWidthInput.value = config.wrist_width ?? 640;
+  els.wristHeightInput.value = config.wrist_height ?? 480;
+  els.externalWidthInput.value = config.external_width ?? 848;
+  els.externalHeightInput.value = config.external_height ?? 480;
   els.handSerialInput.value = config.hand_serial || "";
+  els.wristSerialInput.value = config.wrist_serial || "";
   els.externalSerialInput.value = config.external_serial || "";
   els.handProductIdsInput.value = config.hand_product_ids || "0B5B";
+  els.wristProductIdsInput.value = config.wrist_product_ids || "0B5B";
   els.externalProductIdsInput.value = config.external_product_ids || "0B5B";
   els.cameraStartRetriesInput.value = config.camera_start_retries ?? 20;
   els.cameraStartRetryDelayInput.value = config.camera_start_retry_delay ?? 0.5;
@@ -815,16 +832,21 @@ function collectRecordingForm(pipeline = "spacemouse") {
     root: els.recordRootInput.value.trim(),
     instruction: els.instructionInput.value.trim() || "untitled",
     hand_serial: els.handSerialInput.value.trim(),
+    wrist_serial: els.wristSerialInput.value.trim(),
     external_serial: els.externalSerialInput.value.trim(),
     allow_missing_hand: false,
+    allow_missing_wrist: false,
     allow_missing_external: false,
     hand_product_ids: els.handProductIdsInput.value.trim(),
+    wrist_product_ids: els.wristProductIdsInput.value.trim(),
     external_product_ids: els.externalProductIdsInput.value.trim(),
     fps: Number(els.fpsInput.value || 15),
     hand_width: Number(els.handWidthInput.value || 640),
     hand_height: Number(els.handHeightInput.value || 480),
-    external_width: Number(els.externalWidthInput.value || 1280),
-    external_height: Number(els.externalHeightInput.value || 720),
+    wrist_width: Number(els.wristWidthInput.value || 640),
+    wrist_height: Number(els.wristHeightInput.value || 480),
+    external_width: Number(els.externalWidthInput.value || 848),
+    external_height: Number(els.externalHeightInput.value || 480),
     camera_start_retries: Number(els.cameraStartRetriesInput.value || 20),
     camera_start_retry_delay: Number(els.cameraStartRetryDelayInput.value || 0.5),
     camera_busy_reset: els.cameraBusyResetCheckbox.checked,
@@ -861,6 +883,7 @@ function renderRecordingStatus(payload) {
 
   els.recorderStatusBadge.textContent = recording ? "Recording" : initialized ? "Ready" : sessionInitialized ? "Tmux running" : "Not initialized";
   els.handFrameCount.textContent = payload.counts?.hand_frames ?? 0;
+  els.wristFrameCount.textContent = payload.counts?.wrist_frames ?? 0;
   els.externalFrameCount.textContent = payload.counts?.external_frames ?? 0;
   els.robotFrameCount.textContent = payload.counts?.robot_frames ?? 0;
   els.subtaskLabelCount.textContent = payload.counts?.subtask_labels ?? 0;
@@ -898,14 +921,17 @@ function applyRecorderButtonState() {
 
   els.startRecordingBtn.disabled = busy || !initialized || recording || saving;
   els.resetRecorderBtn.disabled = busy || !sessionInitialized || saving || !resetSupported;
+  els.reconnectRtdeBtn.disabled = busy || !sessionInitialized || saving || !resetSupported;
   els.labelSubtaskBtn.disabled = busy || !initialized || !recording || saving;
   els.stopRecordingBtn.disabled = busy || !initialized || !recording || saving;
   els.deleteEpisodeBtn.disabled = busy || !initialized || recording || saving;
+  els.saveShutdownRecorderBtn.disabled = busy || !sessionInitialized || saving;
   els.shutdownRecorderBtn.disabled = busy || !sessionInitialized || saving;
 }
 
 function renderSourceStatuses(payload) {
   setSourceCard(els.handSourceBadge, payload.hand_camera);
+  setSourceCard(els.wristSourceBadge, payload.wrist_camera);
   setSourceCard(els.externalSourceBadge, payload.external_camera);
   setSourceCard(els.robotSourceBadge, payload.robot);
   setSourceCard(els.gripperSourceBadge, payload.gripper);
@@ -952,6 +978,9 @@ function formatSubtaskReset(subtaskReset) {
   const modeLabel = {
     1: "Skill 1 - grasp RAM",
     2: "Skill 2 - insert RAM",
+    3: "Skill 3 - insert CPU",
+    4: "Skill 4 - insert GPU",
+    5: "Skill 5 - insert DISK",
   }[index] || labels[String(index)] || `segment ${index}`;
   if (index > 0) {
     return `Collection mode: ${modeLabel}, XYZ noise +/-${noise.toFixed(3)} m${configuredText}`;
@@ -983,6 +1012,7 @@ function updateLiveImages(payload) {
 
   const stamp = Date.now();
   setLiveImage(els.liveExternalRgb, payload.external_camera, "external", "rgb", stamp);
+  setLiveImage(els.liveWristRgb, payload.wrist_camera, "wrist", "rgb", stamp);
   setLiveImage(els.liveHandRgb, payload.hand_camera, "hand", "rgb", stamp);
 }
 
@@ -1006,7 +1036,7 @@ function setLiveImage(element, source, camera, kind, stamp) {
 }
 
 function clearLiveImages() {
-  for (const element of [els.liveHandRgb, els.liveExternalRgb]) {
+  for (const element of [els.liveHandRgb, els.liveWristRgb, els.liveExternalRgb]) {
     element.removeAttribute("src");
   }
 }

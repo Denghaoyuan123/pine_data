@@ -80,6 +80,7 @@ class Spacemouse(Thread):
         self.dtype = dtype
         self.deadzone = deadzone
         self.motion_event = SpnavMotionEvent([0,0,0], [0,0,0], 0)
+        self.last_motion_event_time = time.monotonic()
         self.button_state = defaultdict(lambda: False)
         self.tx_zup_spnav = np.array([
             [0,0,-1],
@@ -125,6 +126,13 @@ class Spacemouse(Thread):
 
         return tf_state
 
+    def motion_event_age_s(self):
+        return max(0.0, time.monotonic() - self.last_motion_event_time)
+
+    def clear_motion_state(self):
+        self.motion_event = SpnavMotionEvent([0, 0, 0], [0, 0, 0], 0)
+        self.last_motion_event_time = time.monotonic()
+
     def is_button_pressed(self, button_id):
         return self.button_state[button_id]
 
@@ -146,6 +154,7 @@ class Spacemouse(Thread):
                 event = spnav_poll_event()
                 if isinstance(event, SpnavMotionEvent):
                     self.motion_event = event
+                    self.last_motion_event_time = time.monotonic()
                 elif isinstance(event, SpnavButtonEvent):
                     self.button_state[event.bnum] = event.press
                 else:
@@ -168,6 +177,15 @@ TELEOP_ROTATION_SPEED_SCALE = 0.60
 TELEOP_DOWNWARD_Z_EXTRA_SCALE = 0.40
 TELEOP_COMMAND_HORIZON_S = 0.01
 NON_TELEOP_SPEED_SCALE = 1.00   # reset / non-teleop motions = 100%
+SPACEMOUSE_ACTIVE_EPS = float(os.environ.get("SPACEMOUSE_ACTIVE_EPS", "1e-4"))
+SPACEMOUSE_STALE_STOP_S = float(os.environ.get("SPACEMOUSE_STALE_STOP_S", "0.20"))
+SPACEMOUSE_IDLE_SPEEDSTOP_INTERVAL_S = float(os.environ.get("SPACEMOUSE_IDLE_SPEEDSTOP_INTERVAL_S", "0.20"))
+ROBOT_RESIDUAL_SPEED_STOP_EPS = float(os.environ.get("ROBOT_RESIDUAL_SPEED_STOP_EPS", "0.002"))
+STOP_DRIFT_ZERO_SPEED_ACCEL = float(os.environ.get("STOP_DRIFT_ZERO_SPEED_ACCEL", "30.0"))
+STOP_DRIFT_ZERO_SPEED_TIME_S = float(os.environ.get("STOP_DRIFT_ZERO_SPEED_TIME_S", "0.0"))
+STOP_DRIFT_SUPPRESS_IDLE_ZERO_S = float(os.environ.get("STOP_DRIFT_SUPPRESS_IDLE_ZERO_S", "2.0"))
+ENABLE_IDLE_ZERO_OVERRIDE = os.environ.get("ENABLE_IDLE_ZERO_OVERRIDE", "0").strip().lower() in {"1", "true", "yes", "on"}
+TELEOP_STARTUP_COMMAND_GRACE_S = float(os.environ.get("TELEOP_STARTUP_COMMAND_GRACE_S", "2.0"))
 
 # Non-teleop motion presets (UR defaults scaled by NON_TELEOP_SPEED_SCALE)
 RESET_LIFT_SPEED = 0.25 * NON_TELEOP_SPEED_SCALE
@@ -189,6 +207,21 @@ SUBTASK_RESET_POSES: dict[int, dict[str, Any]] = {
     2: {
         "label": "Skill 2 - insert RAM",
         "tcp": [-0.03, -0.4, 0.38, 2.24, -2.18, -0.06],
+        "gripper": "closed",
+    },
+    3: {
+        "label": "Skill 3 - insert CPU",
+        "tcp": [-0.03, -0.35, 0.37, -0.04, -3.12, -0.14],
+        "gripper": "closed",
+    },
+    4: {
+        "label": "Skill 4 - insert GPU",
+        "tcp": [-0.03, -0.44, 0.42, -0.04, -3.10, -0.12],
+        "gripper": "closed",
+    },
+    5: {
+        "label": "Skill 5 - insert DISK",
+        "tcp": [0.11, -0.57, 0.49, 2.18, -2.22, -0.04],
         "gripper": "closed",
     },
 }
@@ -359,6 +392,42 @@ def exit_force_mode(rtde_c):
         print("[warn] forceModeStop:", e)
 
 
+def force_stop_robot_control(rtde_c, force_mode_active: bool = False, label: str = "shutdown", stop_script: bool = False):
+    """Best-effort hard stop for any active RTDE motion before exiting teleop."""
+    print(f"\n[STOP] Force stopping robot control ({label})...")
+    if rtde_c is None:
+        return
+    try:
+        rtde_c.speedStop()
+        time.sleep(0.03)
+    except Exception as e:
+        print(f"[warn] speedStop during {label}:", e)
+    try:
+        rtde_c.stopL(1.0)
+        time.sleep(0.03)
+    except Exception as e:
+        print(f"[warn] stopL during {label}:", e)
+    if force_mode_active:
+        try:
+            rtde_c.forceModeStop()
+        except Exception as e:
+            print(f"[warn] forceModeStop during {label}:", e)
+    if stop_script:
+        try:
+            rtde_c.stopScript()
+        except Exception as e:
+            print(f"[warn] stopScript during {label}:", e)
+
+
+def send_zero_speed_override(rtde_c, label: str = "stop-drift"):
+    """Clear a stale speedL command without blocking for a full speedStop deceleration."""
+    rtde_c.speedL(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        acceleration=STOP_DRIFT_ZERO_SPEED_ACCEL,
+        time=STOP_DRIFT_ZERO_SPEED_TIME_S,
+    )
+
+
 def ensure_tcp_reachable(host: str, port: int, timeout_s: float, label: str):
     try:
         with socket.create_connection((host, int(port)), timeout=timeout_s):
@@ -487,6 +556,7 @@ def main():
     latest_timestamp = None
     teleop_ready = False
     shutdown_requested = False
+    rtde_stop_requested = False
     listener = None
     gripper: Optional[RobotiqSocketGripper] = None
     gripper_min_position = ROBOTIQ_OPEN_POS
@@ -675,6 +745,7 @@ def main():
     rtde_c = RTDEControlInterface(args.robot_ip)
     rtde_r = RTDEReceiveInterface(args.robot_ip)
     print("[Init] UR RTDE connected")
+    teleop_command_enable_time = time.time() + TELEOP_STARTUP_COMMAND_GRACE_S
 
     if not args.no_gripper:
         try:
@@ -775,6 +846,17 @@ def main():
 
     ctrl_pressed = False
 
+    def request_shutdown_stop(source: str):
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        write_status(message="SpaceMouse teleop shutting down; force-stopping robot.", last_error=status_last_error)
+        force_stop_robot_control(rtde_c, force_mode_active=force_mode_active, label=source, stop_script=False)
+
+    def request_rtde_stop(source: str):
+        nonlocal rtde_stop_requested
+        rtde_stop_requested = True
+        write_status(message=f"UR speedStop requested from {source}; current recording continues.", last_error=status_last_error)
+
     def on_key_press(key):
         nonlocal reset_requested, shutdown_requested, ctrl_pressed
         
@@ -794,14 +876,16 @@ def main():
 
             elif key.char == 'd':
                 handle_delete_last()
+
+            elif key.char == 'u':
+                request_rtde_stop("keyboard-u")
                     
             elif key.char == 'q':
                 if recording:
                     print("\n[RECORDING] Stopping current episode before quitting...")
                     handle_stop_recording()
                 print("Quitting...")
-                shutdown_requested = True
-                write_status(message="SpaceMouse teleop shutting down.", last_error=status_last_error)
+                request_shutdown_stop("keyboard-q")
                 return False  # Stop listener
                 
         except AttributeError:
@@ -827,6 +911,8 @@ def main():
                 handle_stop_recording()
             elif command == "d":
                 handle_delete_last()
+            elif command == "u":
+                request_rtde_stop("stdin-u")
             elif command == "r" or command.startswith("r "):
                 segment_index, noise_xyz_m = parse_reset_command_args(command[1:].strip())
                 request_reset(segment_index, noise_xyz_m)
@@ -838,8 +924,7 @@ def main():
                 if recording:
                     print("\n[RECORDING] Stopping current episode before quitting...")
                     handle_stop_recording()
-                shutdown_requested = True
-                write_status(message="SpaceMouse teleop shutting down.", last_error=status_last_error)
+                request_shutdown_stop("stdin-q")
                 break
             else:
                 write_status(message=f"Unknown SpaceMouse command: {command}", last_error=status_last_error)
@@ -878,6 +963,9 @@ def main():
     close_hold_started_at: Optional[float] = None
     gripper_hold_mode = "idle"
     gripper_hold_progress_position: Optional[float] = None
+    last_motion_was_active = False
+    last_idle_speed_stop_time = 0.0
+    suppress_idle_zero_until = 0.0
 
     print("\n" + "="*60)
     print("SPACEMOUSE TELEOPERATION WITH CONTINUOUS RECORDING")
@@ -889,10 +977,16 @@ def main():
     print("  - Hold Button 1: Slowly close gripper across full range")
     print("  - Close auto-stops on contact until Button 1 is released")
     print("  - Press 'Ctrl+R': Reset to home position")
+    print("  - Press 'U': Clear local SpaceMouse command state without touching RTDE or recording")
     print("  - Ctrl+C: Quit and save trajectory")
     print(f"Linear teleop speed scale: {TELEOP_TRANSLATION_SPEED_SCALE * 100:.1f}%")
     print(f"Angular teleop speed scale: {TELEOP_ROTATION_SPEED_SCALE * 100:.0f}%")
     print(f"Downward Z extra scale: {TELEOP_DOWNWARD_Z_EXTRA_SCALE * 100:.0f}%")
+    print(f"Startup command grace: {TELEOP_STARTUP_COMMAND_GRACE_S:.2f}s")
+    print(f"SpaceMouse stale stop timeout: {SPACEMOUSE_STALE_STOP_S:.2f}s")
+    print(f"Idle zero-speed override enabled: {ENABLE_IDLE_ZERO_OVERRIDE}")
+    if ENABLE_IDLE_ZERO_OVERRIDE:
+        print(f"Stop-drift zero speed override: accel={STOP_DRIFT_ZERO_SPEED_ACCEL:.1f}, time={STOP_DRIFT_ZERO_SPEED_TIME_S:.4f}s")
     print(f"Reset/non-teleop speed scale: {NON_TELEOP_SPEED_SCALE * 100:.0f}%")
     print(f"Recording to: {position_file}")
     print(f"Home Position: TCP={RESET_TCP_POSE[:3]}")
@@ -904,8 +998,25 @@ def main():
     try:
         while True:
             if shutdown_requested:
+                force_stop_robot_control(rtde_c, force_mode_active=force_mode_active, label="main-loop-shutdown", stop_script=False)
                 break
-            if rtde_r.getRobotMode() == 7:
+            if rtde_stop_requested:
+                rtde_stop_requested = False
+                sm.clear_motion_state()
+                latest_motion_state = np.zeros(6, dtype=np.float32)
+                last_motion_was_active = False
+                last_idle_speed_stop_time = time.time()
+                suppress_idle_zero_until = last_idle_speed_stop_time + STOP_DRIFT_SUPPRESS_IDLE_ZERO_S
+                write_status(message="Local SpaceMouse command cleared; recording continues.", last_error="")
+                print("\n[SpaceMouse] Local motion command cleared by U; RTDE was not stopped.")
+            try:
+                robot_mode = rtde_r.getRobotMode()
+            except Exception as e:
+                write_status(message="UR RTDE receive error; use Initialize if RTDE needs a full reconnect.", last_error=str(e))
+                print(f"\n[RTDE] receive error: {e}")
+                time.sleep(0.1)
+                continue
+            if robot_mode == 7:
                 loop_now = time.time()
                 loop_dt = min(max(loop_now - last_loop_time, 0.0), 0.1)
                 last_loop_time = loop_now
@@ -981,9 +1092,17 @@ def main():
                 # Read teleop inputs and robot state
 
                 motion_state = sm.get_motion_state_transformed()
+                sm_age_s = sm.motion_event_age_s()
+                sm_stale = sm_age_s > SPACEMOUSE_STALE_STOP_S
+                if sm_stale:
+                    motion_state = np.zeros_like(motion_state)
+                motion_active = bool(np.max(np.abs(motion_state)) > SPACEMOUSE_ACTIVE_EPS)
                 TCP_pose = rtde_r.getActualTCPPose()
                 joint_pose = rtde_r.getActualQ()
                 Force = rtde_r.getActualTCPForce()
+                actual_velocity = rtde_r.getActualTCPSpeed()
+                actual_velocity_array = np.asarray(actual_velocity, dtype=np.float64)
+                residual_speed = float(np.max(np.abs(actual_velocity_array))) if actual_velocity_array.size else 0.0
                 latest_motion_state = motion_state.copy()
                 latest_tcp_pose = [float(x) for x in TCP_pose]
                 latest_commanded_tcp_pose = [
@@ -1018,32 +1137,66 @@ def main():
                 # print("Motion state: ", motion_state)
                 
                 # Save current data to buffers (line by line recording)
+                sm_active = int(motion_active)
+                sm_text = (
+                    f"SM:{np.round(motion_state, 3)} "
+                    f"age:{sm_age_s:.2f}s active:{sm_active} btn:{int(latest_button_0)}{int(latest_button_1)}"
+                )
                 if recording:
                     tcp_pose_array.append(TCP_pose)
                     joint_pose_array.append(joint_pose)
                     force_array.append(Force)
                     timestamp_array.append(timestamp)
                     # Print recording status
-                    print(f"[REC] Frame {len(tcp_pose_array)} | Force: {np.round(Force, 2)} | TCP: {np.round(TCP_pose, 2)}", end='\r')
+                    print(
+                        f"[REC] Frame {len(tcp_pose_array)} | Force: {np.round(Force, 2)} | "
+                        f"TCP: {np.round(TCP_pose, 2)} | {sm_text}",
+                        end='\r',
+                    )
                 else:
                     # Print normal status when not recording
-                    print(f"Force: {np.round(Force, 2)} | TCP: {np.round(TCP_pose, 2)}", end='\r')
+                    print(f"Force: {np.round(Force, 2)} | TCP: {np.round(TCP_pose, 2)} | {sm_text}", end='\r')
 
                 # Global slow teleop: keep the former near-work-area linear speed everywhere.
                 # --- While in force-mode, don't fight Z force: block teleop Z only (rotations untouched) ---
                 # if force_mode_active:
                 #     motion_state[2] = 0.0
 
-                # Send velocity command
-                rtde_c.speedL(motion_state, acceleration=5, time=0.01)
+                # Send velocity only for active SpaceMouse input. When input returns to zero,
+                # explicitly stop the active UR speed command so the robot cannot coast on it.
+                now = time.time()
+                teleop_commands_enabled = now >= teleop_command_enable_time
+                if motion_active and teleop_commands_enabled:
+                    rtde_c.speedL(motion_state, acceleration=5, time=0.01)
+                    last_motion_was_active = True
+                elif motion_active:
+                    last_motion_was_active = False
+                else:
+                    should_speed_stop = (
+                        teleop_commands_enabled
+                        and ENABLE_IDLE_ZERO_OVERRIDE
+                        and (
+                            last_motion_was_active
+                            or (
+                                now >= suppress_idle_zero_until
+                                and (sm_stale or residual_speed > ROBOT_RESIDUAL_SPEED_STOP_EPS)
+                                and now - last_idle_speed_stop_time >= SPACEMOUSE_IDLE_SPEEDSTOP_INTERVAL_S
+                            )
+                        )
+                    )
+                    if should_speed_stop:
+                        try:
+                            send_zero_speed_override(rtde_c, label="idle")
+                        except Exception as e:
+                            print(f"\n[warn] zero-speed override during idle SpaceMouse input failed: {e}")
+                        last_idle_speed_stop_time = now
+                    last_motion_was_active = False
 
                 # Optional velocity print (filtered)
-                actual_velocity = rtde_r.getActualTCPSpeed()
-                actual_velocity = [0 if abs(x) < 0.01 else x for x in actual_velocity]
+                actual_velocity = [0 if abs(float(x)) < 0.01 else float(x) for x in actual_velocity_array.tolist()]
                 # print("Current velocity vector: ", actual_velocity)
 
                 # --------- Button handling ---------
-                now = time.time()
                 b0 = latest_button_0  # open
                 b1 = latest_button_1  # close
 
@@ -1202,16 +1355,12 @@ def main():
     except KeyboardInterrupt:
         # Graceful shutdown
         print("\n\nStopping robot...")
-        try:
-            if force_mode_active:
-                exit_force_mode(rtde_c)
-        except:
-            pass
+        force_stop_robot_control(rtde_c, force_mode_active=force_mode_active, label="keyboard-interrupt", stop_script=True)
         if gripper is not None:
             gripper.disconnect()
-        rtde_c.stopScript()
         sm.stop()
-        listener.stop()
+        if listener is not None:
+            listener.stop()
         
         # Save summary to file
         with open(position_file, 'a') as f:
@@ -1232,7 +1381,17 @@ def main():
         except Exception:
             pass
         try:
-            rtde_c.stopScript()
+            force_stop_robot_control(rtde_c, force_mode_active=force_mode_active, label="finally", stop_script=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(rtde_c, "disconnect"):
+                rtde_c.disconnect()
+        except Exception:
+            pass
+        try:
+            if hasattr(rtde_r, "disconnect"):
+                rtde_r.disconnect()
         except Exception:
             pass
         try:

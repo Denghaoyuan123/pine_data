@@ -276,12 +276,17 @@ def _write_status(
         "last_saved_episode": globals().get("last_saved_episode"),
         "counts": {
             "hand_frames": _safe_buffer_len("timestamp_hand_array"),
+            "wrist_frames": _safe_buffer_len("timestamp_wrist_array"),
             "external_frames": _safe_buffer_len("timestamp_ext_array"),
             "robot_frames": _safe_buffer_len("robot_timestamp_array"),
             "subtask_labels": _safe_buffer_len("subtask_timestamp_array"),
         },
         "hand_camera": input_status.get(
             "hand_camera",
+            {"requested": True, "enabled": False, "connected": False, "available": False, "status": "disconnected"},
+        ),
+        "wrist_camera": input_status.get(
+            "wrist_camera",
             {"requested": True, "enabled": False, "connected": False, "available": False, "status": "disconnected"},
         ),
         "external_camera": input_status.get(
@@ -334,14 +339,19 @@ class CameraRecorder():
     def __init__(
         self,
         hand_serial_override: Optional[str] = None,
+        wrist_serial_override: Optional[str] = None,
         external_serial_override: Optional[str] = None,
         allow_missing_hand: bool = False,
+        allow_missing_wrist: bool = False,
         allow_missing_external: bool = False,
         hand_product_ids: Optional[Set[str]] = None,
+        wrist_product_ids: Optional[Set[str]] = None,
         external_product_ids: Optional[Set[str]] = None,
         capture_fps: int = 15,
         hand_width: int = 640,
         hand_height: int = 480,
+        wrist_width: int = 640,
+        wrist_height: int = 480,
         external_width: int = 848,
         external_height: int = 480,
         camera_start_retries: int = 20,
@@ -363,6 +373,13 @@ class CameraRecorder():
         self.depth_width_hand = self.width_hand
         self.depth_height_hand = self.height_hand
 
+        # Params for D405 wrist camera
+        self.width_wrist = max(160, int(wrist_width))
+        self.height_wrist = max(120, int(wrist_height))
+        self.fps_wrist = capture_fps
+        self.depth_width_wrist = self.width_wrist
+        self.depth_height_wrist = self.height_wrist
+
         # Params for D405 external camera
         self.width_ext = max(160, int(external_width))
         self.height_ext = max(120, int(external_height))
@@ -372,11 +389,16 @@ class CameraRecorder():
 
         self.capture_fps = capture_fps
         self.hand_serial_override = hand_serial_override
+        self.wrist_serial_override = wrist_serial_override
         self.external_serial_override = external_serial_override
         self.allow_missing_hand = allow_missing_hand
+        self.allow_missing_wrist = allow_missing_wrist
         self.allow_missing_external = allow_missing_external
         self.hand_product_ids = {
             pid.strip().upper() for pid in (hand_product_ids or {"0B5B"}) if pid.strip()
+        }
+        self.wrist_product_ids = {
+            pid.strip().upper() for pid in (wrist_product_ids or {"0B5B"}) if pid.strip()
         }
         self.external_product_ids = {
             pid.strip().upper() for pid in (external_product_ids or {"0B5B"}) if pid.strip()
@@ -406,6 +428,7 @@ class CameraRecorder():
         self.last_error = ""
         self.latest_camera = {
             "hand": {"rgb": None, "depth": None, "timestamp": None},
+            "wrist": {"rgb": None, "depth": None, "timestamp": None},
             "external": {"rgb": None, "depth": None, "timestamp": None},
         }
         self.latest_robot = {
@@ -425,23 +448,19 @@ class CameraRecorder():
 
         # Start cameras
         self.hand_serial = None
+        self.wrist_serial = None
         self.external_serial = None
         self.hand_camera_name = "disabled"
+        self.wrist_camera_name = "disabled"
         self.external_camera_name = "disabled"
 
-        # Mixed-model setups (for example D405 hand + D435/D455 external) have
-        # been more stable with external-first init. For same-model setups such
-        # as dual D405, starting hand first avoids the external pipeline taking
-        # over the metadata node that hand expects during startup.
-        same_model_pid_set = self.hand_product_ids == self.external_product_ids
-        if same_model_pid_set:
-            self.realsense_hand = self.initialize_hand_camera(enforce_required=False)
-            self.realsense_ext = self.initialize_external_camera(enforce_required=False)
-        else:
-            self.realsense_ext = self.initialize_external_camera(enforce_required=False)
-            self.realsense_hand = self.initialize_hand_camera(enforce_required=False)
+        # Use explicit serials when provided. Start the two on-wrist/hand USB2
+        # devices before the external camera to keep roles deterministic.
+        self.realsense_hand = self.initialize_hand_camera(enforce_required=False)
+        self.realsense_wrist = self.initialize_wrist_camera(enforce_required=False)
+        self.realsense_ext = self.initialize_external_camera(enforce_required=False)
 
-        if self.realsense_hand is None and self.realsense_ext is None:
+        if self.realsense_hand is None and self.realsense_wrist is None and self.realsense_ext is None:
             print("WARNING: No active RealSense camera. Live preview will stay blank until a camera is available.")
 
         if self.robot_enabled:
@@ -474,6 +493,32 @@ class CameraRecorder():
                         "width": self.depth_width_hand,
                         "height": self.depth_height_hand,
                         "fps": self.fps_hand,
+                        "input_pixel_format": "gray16le",
+                        "codec": "ffv1",
+                        "output_pixel_format": "gray16le",
+                    },
+                ]
+            )
+        if self.realsense_wrist is not None:
+            writer_specs.extend(
+                [
+                    {
+                        "key": "rgb_wrist",
+                        "filename": "rgb_wrist.mp4",
+                        "width": self.width_wrist,
+                        "height": self.height_wrist,
+                        "fps": self.fps_wrist,
+                        "input_pixel_format": "rgb24",
+                        "codec": "libx264",
+                        "output_pixel_format": "yuv420p",
+                        "output_args": ["-preset", "ultrafast", "-crf", "20"],
+                    },
+                    {
+                        "key": "depth_wrist",
+                        "filename": "depth_wrist_raw.mkv",
+                        "width": self.depth_width_wrist,
+                        "height": self.depth_height_wrist,
+                        "fps": self.fps_wrist,
                         "input_pixel_format": "gray16le",
                         "codec": "ffv1",
                         "output_pixel_format": "gray16le",
@@ -552,6 +597,8 @@ class CameraRecorder():
         self,
         color_hand_image,
         depth_hand_image,
+        color_wrist_image,
+        depth_wrist_image,
         color_ext_image,
         depth_ext_image,
     ) -> None:
@@ -562,6 +609,13 @@ class CameraRecorder():
             writer = self._episode_video_writers.get("depth_hand")
             if writer is not None:
                 writer.write(depth_hand_image)
+        if color_wrist_image is not None and depth_wrist_image is not None:
+            writer = self._episode_video_writers.get("rgb_wrist")
+            if writer is not None:
+                writer.write(color_wrist_image)
+            writer = self._episode_video_writers.get("depth_wrist")
+            if writer is not None:
+                writer.write(depth_wrist_image)
         if color_ext_image is not None and depth_ext_image is not None:
             writer = self._episode_video_writers.get("rgb_external")
             if writer is not None:
@@ -710,7 +764,7 @@ class CameraRecorder():
         """Stop background loops and release hardware handles."""
         self.stop_event.set()
         self._close_episode_video_writers(abort=True)
-        for pipeline in (self.realsense_hand, self.realsense_ext):
+        for pipeline in (self.realsense_hand, self.realsense_wrist, self.realsense_ext):
             if pipeline is None:
                 continue
             try:
@@ -849,6 +903,10 @@ class CameraRecorder():
             width = int(self.width_hand)
             height = int(self.height_hand)
             fps = int(self.fps_hand)
+        elif role == "wrist":
+            width = int(self.width_wrist)
+            height = int(self.height_wrist)
+            fps = int(self.fps_wrist)
         else:
             width = int(self.width_ext)
             height = int(self.height_ext)
@@ -919,6 +977,7 @@ class CameraRecorder():
     def get_input_status_payload(self):
         return {
             "hand_camera": self._camera_status("hand", self.realsense_hand, self.hand_camera_name, self.hand_serial),
+            "wrist_camera": self._camera_status("wrist", self.realsense_wrist, self.wrist_camera_name, self.wrist_serial),
             "external_camera": self._camera_status("external", self.realsense_ext, self.external_camera_name, self.external_serial),
             "robot": self._robot_status(),
             "gripper": self._gripper_status(),
@@ -1139,6 +1198,7 @@ class CameraRecorder():
     def clear_buffers(self):
         """Clear all data buffers"""
         global color_hand_array, depth_hand_array, timestamp_hand_array
+        global color_wrist_array, depth_wrist_array, timestamp_wrist_array
         global color_ext_array, depth_ext_array, timestamp_ext_array
         global robot_timestamp_array, joint_state_array, eef_pose_array
         global eef_pose_commanded_array, eef_twist_command_array
@@ -1148,6 +1208,10 @@ class CameraRecorder():
         color_hand_array = []
         depth_hand_array = []
         timestamp_hand_array = []
+
+        color_wrist_array = []
+        depth_wrist_array = []
+        timestamp_wrist_array = []
         
         color_ext_array = []
         depth_ext_array = []
@@ -1251,6 +1315,71 @@ class CameraRecorder():
         
         return realsense
 
+    def initialize_wrist_camera(self, enforce_required: bool = False):
+        """Initialize wrist camera (default: D405; can be overridden by serial)."""
+        selected_serial = None
+        selected_info = None
+
+        if self.wrist_serial_override:
+            selected_serial = self.wrist_serial_override
+            selected_info = self._find_device_by_serial(selected_serial)
+            if selected_info is None:
+                msg = (
+                    f"Wrist camera serial '{selected_serial}' not found. "
+                    f"Connected RealSense devices: {self._describe_realsense_devices()}"
+                )
+                if self.allow_missing_wrist or not enforce_required:
+                    print(f"WARNING: {msg}. Continue without wrist camera.")
+                    return None
+                raise RuntimeError(msg)
+        else:
+            selected_serial = self._find_device_by_product_ids(
+                self.wrist_product_ids,
+                exclude_serial=self.hand_serial,
+            )
+            if selected_serial is None:
+                msg = (
+                    f"Wrist camera not found (expected PIDs: {sorted(self.wrist_product_ids)}). "
+                    f"Connected RealSense devices: {self._describe_realsense_devices()}"
+                )
+                if self.allow_missing_wrist or not enforce_required:
+                    print(f"WARNING: {msg}. Continue without wrist camera.")
+                    return None
+                raise RuntimeError(msg)
+            selected_info = self._find_device_by_serial(selected_serial)
+
+        self.wrist_serial = selected_serial
+        realsense, selected_profile = self._start_pipeline_with_retry(
+            camera_role="wrist",
+            serial=selected_serial,
+            allow_missing=(self.allow_missing_wrist or not enforce_required),
+            color_width=self.width_wrist,
+            color_height=self.height_wrist,
+            fps=self.fps_wrist,
+            device_info=selected_info,
+        )
+        if realsense is None:
+            return None
+
+        if selected_profile is not None:
+            self.width_wrist = selected_profile["color_width"]
+            self.height_wrist = selected_profile["color_height"]
+            self.depth_width_wrist = selected_profile["depth_width"]
+            self.depth_height_wrist = selected_profile["depth_height"]
+            self.fps_wrist = selected_profile["fps"]
+
+        if selected_info is None:
+            self.wrist_camera_name = "wrist_camera"
+        else:
+            self.wrist_camera_name = f"{selected_info['name']} (pid={selected_info['pid']})"
+        print(
+            f"Wrist camera connected: {self.wrist_camera_name}, serial={selected_serial}, "
+            f"color={self.width_wrist}x{self.height_wrist}@{self.fps_wrist}, "
+            f"depth={self.depth_width_wrist}x{self.depth_height_wrist}@{self.fps_wrist}"
+        )
+
+        return realsense
+
     def initialize_external_camera(self, enforce_required: bool = False):
         """Initialize external camera (default: D405; can be overridden by serial)."""
         selected_serial = None
@@ -1330,9 +1459,16 @@ class CameraRecorder():
                 self.realsense_hand = self.initialize_hand_camera(enforce_required=not self.allow_missing_hand)
             except Exception as exc:
                 issues.append(str(exc))
+        if self.realsense_wrist is None:
+            try:
+                self.realsense_wrist = self.initialize_wrist_camera(enforce_required=not self.allow_missing_wrist)
+            except Exception as exc:
+                issues.append(str(exc))
 
         if not self.allow_missing_hand and self.realsense_hand is None:
             issues.append("Hand camera is required to start recording.")
+        if not self.allow_missing_wrist and self.realsense_wrist is None:
+            issues.append("Wrist camera is required to start recording.")
         if not self.allow_missing_external and self.realsense_ext is None:
             issues.append("External camera is required to start recording.")
 
@@ -1499,6 +1635,13 @@ class CameraRecorder():
         capture_hand = self._get_frames_nonblocking(self.realsense_hand)
         return self._extract_rgbd_images(capture_hand)
 
+    def get_visual_obs_wrist(self):
+        """Get visual observations from D405 wrist camera"""
+        if self.realsense_wrist is None:
+            return None, None
+        capture_wrist = self._get_frames_nonblocking(self.realsense_wrist)
+        return self._extract_rgbd_images(capture_wrist)
+
     def get_visual_obs_external(self):
         """Get visual observations from D405 external camera"""
         if self.realsense_ext is None:
@@ -1554,6 +1697,39 @@ class CameraRecorder():
                 self.realsense_hand = None
                 return False
 
+        if camera_role == "wrist":
+            if self.wrist_serial is None:
+                return False
+            try:
+                if self.realsense_wrist is not None:
+                    self.realsense_wrist.stop()
+            except Exception:
+                pass
+
+            try:
+                info = self._find_device_by_serial(self.wrist_serial)
+                pipeline, selected_profile = self._start_pipeline_with_retry(
+                    camera_role="wrist",
+                    serial=self.wrist_serial,
+                    allow_missing=self.allow_missing_wrist,
+                    color_width=self.width_wrist,
+                    color_height=self.height_wrist,
+                    fps=self.fps_wrist,
+                    device_info=info,
+                )
+                self.realsense_wrist = pipeline
+                if selected_profile is not None:
+                    self.width_wrist = selected_profile["color_width"]
+                    self.height_wrist = selected_profile["color_height"]
+                    self.depth_width_wrist = selected_profile["depth_width"]
+                    self.depth_height_wrist = selected_profile["depth_height"]
+                    self.fps_wrist = selected_profile["fps"]
+                return pipeline is not None
+            except Exception as exc:
+                print(f"WARNING: wrist camera reconnect exception: {exc}")
+                self.realsense_wrist = None
+                return False
+
         if camera_role == "external":
             if self.external_serial is None:
                 return False
@@ -1586,15 +1762,22 @@ class CameraRecorder():
                 err = str(exc)
                 if (
                     "Device or resource busy" in err
-                    and self.realsense_hand is not None
+                    and (self.realsense_hand is not None or self.realsense_wrist is not None)
                 ):
                     # Workaround for sporadic cross-camera metadata node contention:
-                    # restart hand after external reconnect succeeds.
+                    # restart wrist/hand after external reconnect succeeds.
                     try:
-                        self.realsense_hand.stop()
+                        if self.realsense_hand is not None:
+                            self.realsense_hand.stop()
+                    except Exception:
+                        pass
+                    try:
+                        if self.realsense_wrist is not None:
+                            self.realsense_wrist.stop()
                     except Exception:
                         pass
                     self.realsense_hand = None
+                    self.realsense_wrist = None
                     try:
                         info = self._find_device_by_serial(self.external_serial)
                         pipeline, selected_profile = self._start_pipeline_with_retry(
@@ -1616,6 +1799,10 @@ class CameraRecorder():
                         if self.realsense_hand is None:
                             self.realsense_hand = self.initialize_hand_camera(
                                 enforce_required=not self.allow_missing_hand
+                            )
+                        if self.realsense_wrist is None:
+                            self.realsense_wrist = self.initialize_wrist_camera(
+                                enforce_required=not self.allow_missing_wrist
                             )
                         return pipeline is not None
                     except Exception as retry_exc:
@@ -1720,6 +1907,7 @@ class CameraRecorder():
 
                 print(f"Episode {current_time} saved successfully!")
                 print(f"Hand camera frames: {len(timestamp_hand_array)}")
+                print(f"Wrist camera frames: {len(timestamp_wrist_array)}")
                 print(f"External camera frames: {len(timestamp_ext_array)}")
                 print(f"Robot state frames: {len(robot_timestamp_array)}")
                 print(f"\nReady for next episode. Press 'c' to start recording.\n")
@@ -1811,6 +1999,7 @@ class CameraRecorder():
                 # Get visual observations from available cameras. This runs even
                 # while not recording so the web UI can show live inputs.
                 color_hand_image, depth_hand_image, timestamp_hand = None, None, None
+                color_wrist_image, depth_wrist_image, timestamp_wrist = None, None, None
                 color_ext_image, depth_ext_image, timestamp_ext = None, None, None
                 had_recovery_attempt = False
 
@@ -1836,6 +2025,28 @@ class CameraRecorder():
                 else:
                     self._clear_live_preview("hand")
 
+                if self.realsense_wrist is not None:
+                    try:
+                        color_wrist_image, depth_wrist_image = self.get_visual_obs_wrist()
+                        if color_wrist_image is not None:
+                            timestamp_wrist = time.time()
+                            self._update_latest_camera("wrist", color_wrist_image, depth_wrist_image, timestamp_wrist)
+                    except Exception as wrist_exc:
+                        if self._is_runtime_reconnect_error(wrist_exc):
+                            print(f"\nWARNING: wrist camera runtime error: {wrist_exc}")
+                            self._set_last_error(str(wrist_exc))
+                            recovered = self._recover_camera_runtime("wrist")
+                            had_recovery_attempt = True
+                            if recovered:
+                                print("INFO: wrist camera recovered.")
+                            else:
+                                print("WARNING: wrist camera recovery failed.")
+                                self._clear_live_preview("wrist")
+                        else:
+                            raise
+                else:
+                    self._clear_live_preview("wrist")
+
                 if self.realsense_ext is not None:
                     try:
                         color_ext_image, depth_ext_image = self.get_visual_obs_external()
@@ -1858,7 +2069,7 @@ class CameraRecorder():
                 else:
                     self._clear_live_preview("external")
 
-                if color_hand_image is None and color_ext_image is None:
+                if color_hand_image is None and color_wrist_image is None and color_ext_image is None:
                     if had_recovery_attempt:
                         continue
                     now = time.time()
@@ -1875,14 +2086,21 @@ class CameraRecorder():
                     self._write_episode_video_frames(
                         color_hand_image,
                         depth_hand_image,
+                        color_wrist_image,
+                        depth_wrist_image,
                         color_ext_image,
                         depth_ext_image,
                     )
-                    self.synchronize_data(color_hand_image, depth_hand_image, timestamp_hand,
-                                        color_ext_image, depth_ext_image, timestamp_ext)
+                    self.synchronize_data(
+                        color_hand_image, depth_hand_image, timestamp_hand,
+                        color_wrist_image, depth_wrist_image, timestamp_wrist,
+                        color_ext_image, depth_ext_image, timestamp_ext,
+                    )
                     status_parts = []
                     if self.realsense_hand is not None:
                         status_parts.append(f"Hand: {len(timestamp_hand_array)}")
+                    if self.realsense_wrist is not None:
+                        status_parts.append(f"Wrist: {len(timestamp_wrist_array)}")
                     if self.realsense_ext is not None:
                         status_parts.append(f"External: {len(timestamp_ext_array)}")
                     print(" | ".join(status_parts), end='\r')
@@ -1959,12 +2177,19 @@ class CameraRecorder():
             if time_to_sleep > 0:
                 time.sleep(time_to_sleep)
 
-    def synchronize_data(self, color_hand_image, depth_hand_image, timestamp_hand,
-                        color_ext_image, depth_ext_image, timestamp_ext):
+    def synchronize_data(
+        self,
+        color_hand_image, depth_hand_image, timestamp_hand,
+        color_wrist_image, depth_wrist_image, timestamp_wrist,
+        color_ext_image, depth_ext_image, timestamp_ext,
+    ):
         """Add data to buffers"""
         with self.buffer_lock:
             if color_hand_image is not None and depth_hand_image is not None and timestamp_hand is not None:
                 timestamp_hand_array.append(timestamp_hand)
+
+            if color_wrist_image is not None and depth_wrist_image is not None and timestamp_wrist is not None:
+                timestamp_wrist_array.append(timestamp_wrist)
 
             if color_ext_image is not None and depth_ext_image is not None and timestamp_ext is not None:
                 timestamp_ext_array.append(timestamp_ext)
@@ -1996,6 +2221,7 @@ class CameraRecorder():
         self._close_episode_video_writers()
         with self.buffer_lock:
             timestamps_hand = np.array(timestamp_hand_array)
+            timestamps_wrist = np.array(timestamp_wrist_array)
 
             timestamps_ext = np.array(timestamp_ext_array)
 
@@ -2012,6 +2238,7 @@ class CameraRecorder():
         print(f"\nSaving episode metadata and non-vision arrays...")
 
         timestamp_hand_file = os.path.join(episode_folder, "timestamps_hand.npy")
+        timestamp_wrist_file = os.path.join(episode_folder, "timestamps_wrist.npy")
         timestamp_ext_file = os.path.join(episode_folder, "timestamps_external.npy")
 
         # Robot files
@@ -2028,6 +2255,9 @@ class CameraRecorder():
 
         if len(timestamps_hand) > 0:
             np.save(timestamp_hand_file, timestamps_hand)
+
+        if len(timestamps_wrist) > 0:
+            np.save(timestamp_wrist_file, timestamps_wrist)
 
         if len(timestamps_ext) > 0:
             np.save(timestamp_ext_file, timestamps_ext)
@@ -2050,21 +2280,29 @@ class CameraRecorder():
             'instruction': instruction,
             'timestamp': current_time,
             'hand_camera': self.hand_camera_name if self.realsense_hand is not None else 'disabled',
+            'wrist_camera': self.wrist_camera_name if self.realsense_wrist is not None else 'disabled',
             'external_camera': self.external_camera_name if self.realsense_ext is not None else 'disabled',
             'hand_serial': self.hand_serial if self.hand_serial is not None else '',
+            'wrist_serial': self.wrist_serial if self.wrist_serial is not None else '',
             'external_serial': self.external_serial if self.external_serial is not None else '',
             'frequency': self.capture_fps,
             'camera_mode': (
-                'dual'
-                if (self.realsense_hand is not None and self.realsense_ext is not None)
+                'triple'
+                if sum(cam is not None for cam in (self.realsense_hand, self.realsense_wrist, self.realsense_ext)) >= 3
+                else 'dual'
+                if sum(cam is not None for cam in (self.realsense_hand, self.realsense_wrist, self.realsense_ext)) == 2
                 else 'single'
             ),
             'color_order': 'rgb',
             'hand_frames': len(timestamps_hand),
+            'wrist_frames': len(timestamps_wrist),
             'external_frames': len(timestamps_ext),
             'hand_start_time': float(timestamps_hand[0]) if len(timestamps_hand) > 0 else 0.0,
             'hand_end_time': float(timestamps_hand[-1]) if len(timestamps_hand) > 0 else 0.0,
             'hand_duration': float(timestamps_hand[-1] - timestamps_hand[0]) if len(timestamps_hand) > 0 else 0.0,
+            'wrist_start_time': float(timestamps_wrist[0]) if len(timestamps_wrist) > 0 else 0.0,
+            'wrist_end_time': float(timestamps_wrist[-1]) if len(timestamps_wrist) > 0 else 0.0,
+            'wrist_duration': float(timestamps_wrist[-1] - timestamps_wrist[0]) if len(timestamps_wrist) > 0 else 0.0,
             'external_start_time': float(timestamps_ext[0]) if len(timestamps_ext) > 0 else 0.0,
             'external_end_time': float(timestamps_ext[-1]) if len(timestamps_ext) > 0 else 0.0,
             'external_duration': float(timestamps_ext[-1] - timestamps_ext[0]) if len(timestamps_ext) > 0 else 0.0,
@@ -2103,6 +2341,25 @@ class CameraRecorder():
                 fps=self.fps_hand,
                 verified_lossless=True,
             )
+        if len(timestamps_wrist) > 0:
+            vision_files["rgb_wrist"] = _vision_entry(
+                path="rgb_wrist.mp4",
+                storage="mp4",
+                codec="h264",
+                shape=(len(timestamps_wrist), self.height_wrist, self.width_wrist, 3),
+                dtype="uint8",
+                fps=self.fps_wrist,
+                channel_order="rgb",
+            )
+            vision_files["depth_wrist"] = _vision_entry(
+                path="depth_wrist_raw.mkv",
+                storage="mkv",
+                codec="ffv1",
+                shape=(len(timestamps_wrist), self.depth_height_wrist, self.depth_width_wrist),
+                dtype="uint16",
+                fps=self.fps_wrist,
+                verified_lossless=True,
+            )
         if len(timestamps_ext) > 0:
             vision_files["rgb_external"] = _vision_entry(
                 path="rgb_external.mp4",
@@ -2136,6 +2393,14 @@ class CameraRecorder():
             print(f"  Timestamps: {timestamp_hand_file}")
         else:
             print("Hand camera disabled or no frames captured.")
+
+        if len(timestamps_wrist) > 0:
+            print(f"\nSaved wrist camera frames: {len(timestamps_wrist)}")
+            print(f"  RGB MP4: {os.path.join(episode_folder, 'rgb_wrist.mp4')}")
+            print(f"  Depth: {os.path.join(episode_folder, 'depth_wrist_raw.mkv')}")
+            print(f"  Timestamps: {timestamp_wrist_file}")
+        else:
+            print("\nWrist camera disabled or no frames captured.")
 
         if len(timestamps_ext) > 0:
             print(f"\nSaved external camera frames: {len(timestamps_ext)}")
@@ -2171,6 +2436,7 @@ def main():
     # Global variables for controlling the recording state
     global data_folder, recording, instruction, current_episode_folder, current_time
     global color_hand_array, depth_hand_array, timestamp_hand_array
+    global color_wrist_array, depth_wrist_array, timestamp_wrist_array
     global color_ext_array, depth_ext_array, timestamp_ext_array
     global robot_timestamp_array, joint_state_array, eef_pose_array
     global eef_pose_commanded_array, eef_twist_command_array
@@ -2191,6 +2457,11 @@ def main():
         help="Force hand camera serial (overwrite auto-detection).",
     )
     parser.add_argument(
+        "--wrist-serial",
+        default=None,
+        help="Force wrist camera serial (overwrite auto-detection).",
+    )
+    parser.add_argument(
         "--external-serial",
         default=None,
         help="Force external camera serial (overwrite auto-detection).",
@@ -2201,6 +2472,11 @@ def main():
         help="Allow running without hand camera (useful when D405 is not connected).",
     )
     parser.add_argument(
+        "--allow-missing-wrist",
+        action="store_true",
+        help="Allow running without wrist camera.",
+    )
+    parser.add_argument(
         "--allow-missing-external",
         action="store_true",
         help="Allow running without external camera.",
@@ -2209,6 +2485,11 @@ def main():
         "--hand-product-ids",
         default="0B5B",
         help="Comma-separated hand camera product IDs for auto-detection.",
+    )
+    parser.add_argument(
+        "--wrist-product-ids",
+        default="0B5B",
+        help="Comma-separated wrist camera product IDs for auto-detection.",
     )
     parser.add_argument(
         "--external-product-ids",
@@ -2232,6 +2513,18 @@ def main():
         type=int,
         default=480,
         help="Hand camera RGB/depth height.",
+    )
+    parser.add_argument(
+        "--wrist-width",
+        type=int,
+        default=640,
+        help="Wrist camera RGB/depth width.",
+    )
+    parser.add_argument(
+        "--wrist-height",
+        type=int,
+        default=480,
+        help="Wrist camera RGB/depth height.",
     )
     parser.add_argument(
         "--external-width",
@@ -2344,6 +2637,9 @@ def main():
     color_hand_array = []
     depth_hand_array = []
     timestamp_hand_array = []
+    color_wrist_array = []
+    depth_wrist_array = []
+    timestamp_wrist_array = []
     color_ext_array = []
     depth_ext_array = []
     timestamp_ext_array = []
@@ -2374,14 +2670,19 @@ def main():
     # Initialize camera recording system
     recorder = CameraRecorder(
         hand_serial_override=args.hand_serial,
+        wrist_serial_override=args.wrist_serial,
         external_serial_override=args.external_serial,
         allow_missing_hand=args.allow_missing_hand,
+        allow_missing_wrist=args.allow_missing_wrist,
         allow_missing_external=args.allow_missing_external,
         hand_product_ids=parse_pid_csv(args.hand_product_ids),
+        wrist_product_ids=parse_pid_csv(args.wrist_product_ids),
         external_product_ids=parse_pid_csv(args.external_product_ids),
         capture_fps=args.fps,
         hand_width=args.hand_width,
         hand_height=args.hand_height,
+        wrist_width=args.wrist_width,
+        wrist_height=args.wrist_height,
         external_width=args.external_width,
         external_height=args.external_height,
         camera_start_retries=args.camera_start_retries,
@@ -2401,6 +2702,7 @@ def main():
     print("\n" + "="*50)
     print("MULTI CAMERA RECORDING SYSTEM")
     print(f"Hand camera: {recorder.hand_camera_name} | serial={recorder.hand_serial}")
+    print(f"Wrist camera: {recorder.wrist_camera_name} | serial={recorder.wrist_serial}")
     print(f"External camera: {recorder.external_camera_name} | serial={recorder.external_serial}")
     if recorder.robot_enabled:
         print(
